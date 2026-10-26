@@ -1,0 +1,19 @@
+{
+  "name": "tuition-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tuition management API (Phase 2 foundation: in-memory store, demo auth)",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "express": "^5.3.0"
+  }
+}

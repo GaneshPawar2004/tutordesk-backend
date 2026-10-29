@@ -38,6 +38,8 @@ export function createApp({ db, secret, simulateSms = true, smsSpeed = 1, allowe
     next();
   });
 
+  // Keep-alive for uptime pingers: never touches the database, so Neon can still sleep.
+  app.get('/api/ping', (_req, res) => res.json({ ok: true }));
   app.get('/api/health', async (_req, res) => {
     await db.query('select 1');
     res.json({ ok: true, database: 'connected' });

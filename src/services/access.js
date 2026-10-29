@@ -29,21 +29,3 @@ export function requireClass(user, classId) {
 export function requirePermission(user, permission) {
   if (!can(user, permission)) throw forbidden(`Missing permission: ${permission}`);
 }
-
-export function currentYear(t) {
-  return t.years.find((y) => y.status === 'active') ?? t.years[t.years.length - 1];
-}
-
-/** Active students enrolled in a class for a year, sorted by name. */
-export function roster(t, classId, yearId) {
-  const ids = new Set(
-    t.enrollments
-      .filter((e) => e.classId === classId && e.academicYearId === yearId && e.status !== 'withdrawn')
-      .map((e) => e.studentId),
-  );
-  return t.students
-    .filter((s) => s.isActive && ids.has(s.id))
-    .sort((a, b) => fullName(a).localeCompare(fullName(b)));
-}
-
-export const fullName = (s) => `${s.firstName} ${s.lastName}`;

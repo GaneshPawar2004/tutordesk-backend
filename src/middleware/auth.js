@@ -2,37 +2,35 @@ import { forbidden, unauthorized } from '../lib/errors.js';
 import { verifyToken } from '../lib/token.js';
 
 /**
- * Resolves the tenant and the user for every /api request. Permissions are
- * re-read from the store on each request, so an admin's change applies to
- * the staff member's very next call.
+ * Resolves the user (and their tenant) from the bearer token on every request.
+ * The user row is re-read each time, so permission or status changes made by
+ * an admin apply to the staff member's very next call.
  */
-export function authenticate(store, secret) {
-  return (req, _res, next) => {
-    const header = req.get('authorization') ?? '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-    const payload = verifyToken(token, secret);
-    if (!payload) return next(unauthorized());
-
-    const t = store.tenant(payload.tenantId);
-    if (!t) return next(unauthorized());
-
-    if (payload.role === 'admin') {
-      req.user = { role: 'admin', id: t.admin.id, name: t.admin.name, isActive: true, permissions: [], assignedClassIds: [] };
-    } else {
-      const member = t.staff.find((s) => s.id === payload.staffId);
-      if (!member) return next(unauthorized());
-      if (!member.isActive) return next(forbidden('Your account is inactive'));
-      req.user = {
-        role: 'staff',
-        id: member.id,
-        name: member.name,
-        isActive: member.isActive,
-        permissions: member.permissions,
-        assignedClassIds: member.assignedClassIds,
-      };
+export function authenticate(db, secret) {
+  return async (req, _res, next) => {
+    try {
+      const header = req.get('authorization') ?? '';
+      const payload = verifyToken(header.startsWith('Bearer ') ? header.slice(7) : null, secret);
+      if (!payload) return next(unauthorized());
+      const u = await db.one(
+        `select u.id, u.tenant_id "tenantId", u.role, u.name, coalesce(u.email, '') email, u.phone, u.designation,
+                u.permissions, u.assigned_class_ids "assignedClassIds", u.is_active "isActive", u.account_status "accountStatus"
+           from users u where u.id = $1 and u.tenant_id = $2`,
+        [payload.userId, payload.tenantId],
+      );
+      if (!u) return next(unauthorized());
+      if (!u.isActive) return next(forbidden('Your account is inactive. Contact your tuition admin.'));
+      if (u.role === 'admin') {
+        // Admin can use every class, including ones created after sign-in.
+        const rows = await db.query('select id from classes where tenant_id = $1', [u.tenantId]);
+        u.assignedClassIds = rows.map((r) => r.id);
+      }
+      req.user = u;
+      req.tenantId = u.tenantId;
+      next();
+    } catch (e) {
+      next(e);
     }
-    req.tenant = t;
-    next();
   };
 }
 

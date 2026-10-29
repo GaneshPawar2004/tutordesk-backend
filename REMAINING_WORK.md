@@ -1,87 +1,56 @@
-# TutorDesk Backend — Remaining Work
+# TutorDesk Backend — Status & Remaining Work
 
-Node.js + Express 5 REST API for the tuition SaaS. Part of three repos:
+Node.js 22 + Express 5 + PostgreSQL (Neon). Part of three repos:
 `tutordesk-app` (Flutter), `tutordesk-web` (React), `tutordesk-backend` (this).
-
-## Current state
-
-- **Working foundation with an in-memory store.** All data comes from a deterministic seed
-  (`src/data/seed.js`: Bright Future Classes, 128 active students, 5 staff, 4 academic
-  years, fees, attendance, exams, message batches). Everything resets on restart.
-- **Demo auth only:** `POST /api/auth/demo-login` with `{ role: "admin" | "staff", staffId }`
-  returns an HMAC-signed token (no password).
-- The server enforces the rules:
-  - staff get 403 on all fee routes and only see their assigned classes
-  - permissions are re-read on every request, so revoking one takes effect immediately
-  - one attendance session per class per day; a second submission gets 409; corrections
-    are admin-only with an audit note
-  - message batches are idempotent on a `sourceKey`; retry resends failed recipients only
-  - payments are append-only and validated against the balance
-  - promotion adds an enrollment and never duplicates the student; previous fees and
-    dues are untouched
-  - exam totals are computed from marks; correcting published marks needs a note and
-    bumps the revision
-- SMS sending is **simulated** with timers (`src/services/messaging.js`). Nothing is sent.
-- `npm test`: 10 integration tests passing (Node's built-in test runner, real HTTP).
 
 ## Setup
 
 ```bash
 npm install
-cp .env.example .env     # optional; works without it
-npm start                # http://localhost:4000
-npm run dev              # with --watch
-npm test
+cp .env.example .env      # put your Neon URL in NEON_DB_URL (or DATABASE_URL)
+npm start                 # http://localhost:4000 — also prints the LAN address for phones
+npm test                  # integration tests in a throwaway Postgres schema (dropped after)
 ```
 
-## Layout
+On start the server creates/updates tables (idempotent) and, if missing, appends a
+random `TOKEN_SECRET` to `.env`.
 
-```text
-src/
-  app.js              Express app factory (routes, JSON errors)
-  server.js           entry point
-  data/seed.js        demo dataset;  data/store.js  tenant-partitioned in-memory store
-  middleware/auth.js  token → tenant + user (fresh permissions each request)
-  routes/             auth, core (me/dashboard/years/classes/notifications), students
-                      (+promotions), attendance, fees, staff, exams, messages
-  services/           access rules, fee maths, result maths, message templates, messaging
-test/api.test.js
-```
+## What works
 
-## Remaining work (suggested order)
+- **Real data in Postgres.** Every row carries `tenant_id`; tenants are fully isolated.
+  New tuitions start empty (no sample data).
+- **Real accounts.** `POST /api/auth/register` (tuition + admin; creates the current
+  academic year and 6 default subjects), `POST /api/auth/login` (phone or email +
+  password, scrypt-hashed), `POST /api/auth/accept-invite` (staff set their own
+  password with the admin's invite code). 30-day signed tokens. The user row is
+  re-read on every request, so permission changes apply immediately.
+- **Rules enforced by the database/server:** one attendance session per class per day
+  (unique constraint; 409 on a second save, even if simultaneous); admin-only audited
+  corrections; staff get 403 on fees/staff; staff only see assigned classes; one
+  message batch per source (unique constraint) and retry resends failures only;
+  payments append-only and locked against overpaying; promotion adds an enrollment
+  without duplicating the student or touching last year's fee; exam totals computed;
+  published-mark corrections need a note and bump the revision.
+- `GET /api/sync` returns everything the signed-in user may see — used by the mobile app.
+- **SMS transport per tenant** (`tenants.sms.mode`, `src/services/messaging.js`): `simulated` (default,
+  nothing reaches parents) or `device` — an admin's Android phone running the app claims queued
+  messages (`POST /api/sms-device/claim`), sends from its SIM and reports back
+  (`POST /api/sms-device/report`). Switch with `PUT /api/messages/sms-settings`. Claimed but
+  unreported messages fail after 10 minutes and are never re-sent automatically.
 
-1. **Database.** Replace the in-memory store with PostgreSQL (recommended) and migrations
-   (Prisma, Drizzle or Knex). Every table carries `tenant_id`. Add DB-level guarantees:
-   - unique `(tenant_id, class_id, date)` on attendance sessions (the real lock)
-   - unique `(tenant_id, source_key)` on message batches (the real idempotency)
-   - unique `(tenant_id, student_id, academic_year_id)` on enrollments
-   - payments insert-only (no UPDATE/DELETE grants), in transactions
-2. **Real authentication and tenancy.** Phone OTP or password (hashed with argon2/bcrypt),
-   access and refresh tokens, staff invitation flow (invite link → set password), tenant
-   sign-up and subscription status. Remove or dev-gate `demo-login`.
-3. **SMS transport.** Pick the provider model (Android SIM sender app polling a queue, or
-   a gateway such as MSG91 or Twilio) and implement it behind the `dispatch` boundary in
-   `services/messaging.js`. Add delivery-report webhooks, rate limits, DLT template
-   registration (India), and per-tenant usage tracking. Only mark "delivered" on a real report.
-4. **Missing endpoints:**
-   - Reports (enrollment, attendance %, fee collection, dues, exam performance) with
-     date-range, year and class filters
-   - Edit exam metadata (`PATCH /api/exams/:id`); delete draft exams
-   - Withdraw or re-activate an enrollment; student photo upload (object storage)
-   - SMS settings update; notification creation on events (only the activity feed is
-     written today)
-   - Pagination and server-side search on list endpoints
-5. **Hardening:** CORS allow-list for the web domain, `helmet`, rate limiting (auth
-   especially), request logging with request IDs, input validation with a schema library
-   (Zod), consistent error codes, OpenAPI/Swagger docs.
-6. **Ops:** Dockerfile, environment config, health/readiness probes, backups, monitoring,
-   CI running `npm test`.
-7. **More tests** for each route's validation errors and the cross-tenant isolation case.
+## Remaining work
 
-## Notes
-
-- Money is whole rupees (integers). Dates are `YYYY-MM-DD` strings in local time;
-  timestamps are ISO strings.
-- `TOKEN_SECRET`: if unset or `change-me`, a random secret is generated at start, so
-  tokens stop working after a restart (fine for local dev).
-- `SMS_SIMULATION=off` disables the simulated sender (batches stay queued).
+1. **SMS:** optional gateway transport (e.g. MSG91 with Indian DLT templates) next to the
+   Android SIM sender; per-tenant daily limits; tests for the device endpoints.
+2. **Account features:** "forgot password" (today: admin creates a new invite code for
+   staff; there is no self-service reset for the admin), changing password while
+   logged in, sign-out of all devices.
+3. **Endpoints not built yet:** reports (attendance %, collections, dues, exam
+   performance with filters), delete/withdraw flows, student photo upload, pagination
+   and server-side search on large lists, editing SMS settings.
+4. **Scaling:** `/api/sync` sends the whole tenant; fine for a single tuition, but move
+   the app to paginated endpoints for large tenants.
+5. **Hardening:** CORS allow-list (currently reflects any origin), helmet, rate limiting
+   on auth routes, structured logs, schema validation library, OpenAPI docs.
+6. **Ops:** deploy to a server (Render/Railway/VPS) with HTTPS so the app works outside
+   your Wi‑Fi; backups; CI running `npm test`.

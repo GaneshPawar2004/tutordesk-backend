@@ -1,12 +1,23 @@
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { after, before, describe, test } from 'node:test';
 
 import { createApp } from '../src/app.js';
+import { createDb } from '../src/db/index.js';
+import { migrate } from '../src/db/schema.js';
 import { signToken } from '../src/lib/token.js';
 
-let server;
-let app;
-let base;
+try {
+  process.loadEnvFile('.env');
+} catch {
+  /* CI may provide env vars directly */
+}
+
+// Each run uses its own throwaway Postgres schema, dropped afterwards.
+const SCHEMA = `test_${randomBytes(4).toString('hex')}`;
+const url = process.env.DATABASE_URL ?? process.env.NEON_DB_URL;
+let db, app, server, base;
+const phoneNo = () => `9${String(Math.floor(Math.random() * 1e9)).padStart(9, '0')}`;
 
 async function call(path, { token, method = 'GET', body } = {}) {
   const res = await fetch(base + path, {
@@ -14,197 +25,178 @@ async function call(path, { token, method = 'GET', body } = {}) {
     headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  return { status: res.status, body: await res.json() };
+  return { status: res.status, body: await res.json().catch(() => null) };
 }
+const ok = (r, status = 200) => {
+  assert.equal(r.status, status, JSON.stringify(r.body));
+  return r.body;
+};
 
-async function login(role, staffId) {
-  const r = await call('/api/auth/demo-login', { method: 'POST', body: { role, staffId } });
-  assert.equal(r.status, 200);
-  return r.body.token;
-}
+// Shared fixture built through the public API, like a real tuition would.
+const fx = {};
 
 before(async () => {
-  app = createApp({ secret: 'test-secret', simulateSms: true, smsSpeed: 1000 });
-  await new Promise((resolve) => {
-    server = app.listen(0, resolve);
-  });
+  const admin = createDb({ url });
+  await admin.query(`create schema "${SCHEMA}"`);
+  await admin.close();
+  db = createDb({ url, schema: SCHEMA });
+  await migrate(db);
+  app = createApp({ db, secret: 'test-secret', smsSpeed: 1000 });
+  await new Promise((r) => { server = app.listen(0, r); });
   base = `http://localhost:${server.address().port}`;
+
+  fx.adminPhone = phoneNo();
+  fx.admin = ok(await call('/api/auth/register', { method: 'POST', body: { tuitionName: 'Test Classes', city: 'Pune', adminName: 'Asha Admin', phone: fx.adminPhone, password: 'secret123' } }), 201).token;
+  const me = ok(await call('/api/me', { token: fx.admin }));
+  fx.yearId = me.currentYearId;
+  const subjects = ok(await call('/api/subjects', { token: fx.admin }));
+  fx.math = subjects.find((s) => s.name === 'Mathematics').id;
+  fx.class5 = ok(await call('/api/classes', { token: fx.admin, method: 'POST', body: { name: 'Class 5', grade: 5, sessionLabel: '4–5 PM', subjectIds: [fx.math] } }), 201).id;
+  fx.class6 = ok(await call('/api/classes', { token: fx.admin, method: 'POST', body: { name: 'Class 6', grade: 6, subjectIds: [fx.math] } }), 201).id;
+  fx.students = [];
+  for (const [i, name] of ['Ganesh Pawar', 'Priya Patil', 'Aarav Sharma'].entries()) {
+    const [firstName, lastName] = name.split(' ');
+    const r = ok(await call('/api/students', { token: fx.admin, method: 'POST', body: {
+      firstName, lastName, dateOfBirth: '2016-04-0' + (i + 1), parentName: `Parent ${lastName}`, parentPhone: phoneNo(),
+      yearId: fx.yearId, classId: fx.class5,
+      fee: { annualFee: 12000, installmentCount: 6, frequency: 'monthly', firstDueDate: '2026-06-15', initialAmount: 2000, method: 'cash' },
+    } }), 201);
+    fx.students.push(r.student.id);
+  }
+  // Staff member assigned to Class 5 only, with an invite code.
+  fx.staffPhone = phoneNo();
+  const staff = ok(await call('/api/staff', { token: fx.admin, method: 'POST', body: { name: 'Sneha Kulkarni', phone: fx.staffPhone, designation: 'Maths teacher', assignedClassIds: [fx.class5] } }), 201);
+  fx.staffId = staff.id;
+  fx.inviteCode = staff.inviteCode;
 });
 
-after(() => {
-  app.locals.close();
-  server.close();
+after(async () => {
+  app?.locals.close();
+  server?.close();
+  await db?.close();
+  const admin = createDb({ url });
+  await admin.query(`drop schema if exists "${SCHEMA}" cascade`);
+  await admin.close();
 });
 
-describe('auth', () => {
-  test('rejects missing, tampered and foreign-secret tokens', async () => {
-    assert.equal((await call('/api/me')).status, 401);
-    const good = await login('admin');
-    assert.equal((await call('/api/me', { token: `${good}x` })).status, 401);
-    const foreign = signToken({ tenantId: 'tui-1', role: 'admin' }, 'other-secret');
-    assert.equal((await call('/api/me', { token: foreign })).status, 401);
-  });
-});
-
-describe('role enforcement on the server', () => {
-  test('staff get 403 from every fee endpoint and never see fee figures', async () => {
-    const staff = await login('staff', 'stf-1');
-    for (const path of ['/api/fees/summary', '/api/fees/students', '/api/fees/enrollments/enr-1', '/api/students/STU-0001/fees']) {
-      assert.equal((await call(path, { token: staff })).status, 403, path);
-    }
-    const pay = await call('/api/fees/payments', { token: staff, method: 'POST', body: { enrollmentId: 'enr-1', amount: 1, method: 'cash' } });
-    assert.equal(pay.status, 403);
-    const dash = await call('/api/dashboard', { token: staff });
-    assert.equal(dash.body.fees, undefined);
-    const profile = await call('/api/students/STU-0001', { token: staff });
-    assert.equal(profile.status, 200);
-    assert.ok(profile.body.enrollments.every((e) => e.fees === undefined));
+describe('accounts', () => {
+  test('register rejects duplicates; login works by phone; wrong password fails', async () => {
+    const dup = await call('/api/auth/register', { method: 'POST', body: { tuitionName: 'Other', adminName: 'X Y', phone: fx.adminPhone, password: 'secret123' } });
+    assert.equal(dup.status, 409);
+    assert.equal((await call('/api/auth/login', { method: 'POST', body: { identifier: fx.adminPhone, password: 'nope-nope' } })).status, 401);
+    ok(await call('/api/auth/login', { method: 'POST', body: { identifier: `+91 ${fx.adminPhone}`, password: 'secret123' } }));
   });
 
-  test('staff only see their assigned classes', async () => {
-    const sneha = await login('staff', 'stf-1'); // Classes 5, 6, 7
-    const list = await call('/api/students', { token: sneha });
-    assert.ok(list.body.length > 0);
-    assert.ok(list.body.every((s) => ['cls-5', 'cls-6', 'cls-7'].includes(s.classId)));
-    const class10 = await call('/api/students?classId=cls-10', { token: sneha });
-    assert.equal(class10.body.length, 0);
-    const att = await call('/api/attendance/sessions', { token: sneha, method: 'POST', body: { classId: 'cls-10', records: {} } });
-    assert.equal(att.status, 403);
+  test('student IDs are sequential per tuition', () => {
+    assert.deepEqual(fx.students, ['STU-0001', 'STU-0002', 'STU-0003']);
   });
 
-  test('permission changes apply on the very next request', async () => {
-    const admin = await login('admin');
-    const sneha = await login('staff', 'stf-1');
-    const before = await call('/api/me', { token: sneha });
-    assert.equal(before.body.canSendMessages, true);
-    const member = (await call('/api/staff/stf-1', { token: admin })).body;
-    const without = member.permissions.filter((p) => p !== 'sendSms');
-    assert.equal((await call('/api/staff/stf-1/permissions', { token: admin, method: 'PUT', body: { permissions: without } })).status, 200);
-    const now = await call('/api/me', { token: sneha });
-    assert.equal(now.body.canSendMessages, false);
-    const send = await call('/api/messages/announcements', {
-      token: sneha, method: 'POST', body: { draftKey: 'x', title: 'Test', body: 'This should be blocked.' },
-    });
-    assert.equal(send.status, 403);
-    // Financial permissions are not grantable at all.
-    const bad = await call('/api/staff/stf-1/permissions', { token: admin, method: 'PUT', body: { permissions: ['viewFees'] } });
-    assert.equal(bad.status, 400);
-    await call('/api/staff/stf-1/permissions', { token: admin, method: 'PUT', body: { permissions: member.permissions } });
+  test('staff accept invite, then log in; tampered tokens rejected', async () => {
+    assert.equal((await call('/api/auth/login', { method: 'POST', body: { identifier: fx.staffPhone, password: 'whatever1' } })).status, 401);
+    assert.equal((await call('/api/auth/accept-invite', { method: 'POST', body: { phone: fx.staffPhone, code: 'WRONG1', password: 'teacher123' } })).status, 401);
+    fx.staff = ok(await call('/api/auth/accept-invite', { method: 'POST', body: { phone: fx.staffPhone, code: fx.inviteCode, password: 'teacher123' } })).token;
+    ok(await call('/api/auth/login', { method: 'POST', body: { identifier: fx.staffPhone, password: 'teacher123' } }));
+    assert.equal((await call('/api/me', { token: `${fx.staff}x` })).status, 401);
+    const forged = signToken({ tenantId: 'x', userId: fx.staffId }, 'other-secret');
+    assert.equal((await call('/api/me', { token: forged })).status, 401);
   });
 });
 
-describe('attendance', () => {
-  test('a session can only be submitted once; correction needs admin + note', async () => {
-    const admin = await login('admin');
-    const sneha = await login('staff', 'stf-1');
-    const rosterRes = await call('/api/attendance/classes/cls-7/roster', { token: sneha });
-    const records = Object.fromEntries(rosterRes.body.students.map((s) => [s.id, 'present']));
+describe('isolation and permissions', () => {
+  test('another tuition cannot see this tuition\'s data', async () => {
+    const other = ok(await call('/api/auth/register', { method: 'POST', body: { tuitionName: 'Rival Classes', adminName: 'Ravi R', phone: phoneNo(), password: 'secret123' } }), 201).token;
+    assert.equal((await call('/api/students', { token: other })).body.length, 0);
+    assert.equal((await call(`/api/students/${fx.students[0]}`, { token: other })).status, 404);
+    const foreignRoster = await call(`/api/attendance/classes/${fx.class5}/roster`, { token: other });
+    assert.equal(foreignRoster.body.students?.length ?? 0, 0, 'must not see another tuition students');
+    const sync = ok(await call('/api/sync', { token: other }));
+    assert.equal(sync.students.length, 0);
+    assert.equal(sync.classes.length, 0);
+  });
 
-    const incomplete = await call('/api/attendance/sessions', { token: sneha, method: 'POST', body: { classId: 'cls-7', records: {} } });
-    assert.equal(incomplete.status, 400);
+  test('staff: 403 on fees, no fee data in sync, only own classes', async () => {
+    for (const p of ['/api/fees/summary', '/api/fees/students', '/api/staff']) assert.equal((await call(p, { token: fx.staff })).status, 403, p);
+    const sync = ok(await call('/api/sync', { token: fx.staff }));
+    assert.equal(sync.feePlans.length, 0);
+    assert.equal(sync.payments.length, 0);
+    assert.ok(sync.staff.every((s) => s.inviteCode === null));
+    assert.equal((await call(`/api/attendance/classes/${fx.class6}/roster`, { token: fx.staff })).status, 403);
+  });
 
-    const first = await call('/api/attendance/sessions', { token: sneha, method: 'POST', body: { classId: 'cls-7', records } });
-    assert.equal(first.status, 201);
-    const second = await call('/api/attendance/sessions', { token: admin, method: 'POST', body: { classId: 'cls-7', records } });
-    assert.equal(second.status, 409);
-    assert.equal(second.body.error.details.session.markedBy, 'Sneha Kulkarni');
-
-    const studentId = rosterRes.body.students[0].id;
-    const staffFix = await call(`/api/attendance/sessions/${first.body.id}`, { token: sneha, method: 'PATCH', body: { note: 'x', records: { [studentId]: 'absent' } } });
-    assert.equal(staffFix.status, 403);
-    const noNote = await call(`/api/attendance/sessions/${first.body.id}`, { token: admin, method: 'PATCH', body: { records: { [studentId]: 'absent' } } });
-    assert.equal(noNote.status, 400);
-    const fix = await call(`/api/attendance/sessions/${first.body.id}`, { token: admin, method: 'PATCH', body: { note: 'Arrived after roll call', records: { [studentId]: 'absent' } } });
-    assert.equal(fix.status, 200);
-    assert.equal(fix.body.counts.absent, 1);
-    assert.match(fix.body.audit[0].note, /1 record changed/);
+  test('permission revocation applies on the next request', async () => {
+    ok(await call(`/api/staff/${fx.staffId}/permissions`, { token: fx.admin, method: 'PUT', body: { permissions: ['viewStudents', 'markAttendance', 'viewExamResults', 'enterMarks', 'sendParentMessages', 'sendSms'] } }));
+    assert.equal(ok(await call('/api/me', { token: fx.staff })).canSendMessages, true);
+    ok(await call(`/api/staff/${fx.staffId}/permissions`, { token: fx.admin, method: 'PUT', body: { permissions: ['viewStudents', 'markAttendance', 'viewExamResults', 'enterMarks', 'sendParentMessages'] } }));
+    assert.equal(ok(await call('/api/me', { token: fx.staff })).canSendMessages, false);
+    assert.equal((await call('/api/staff/x/permissions', { token: fx.admin, method: 'PUT', body: { permissions: ['viewFees'] } })).status, 400);
   });
 });
 
-describe('messaging', () => {
-  test('one batch per session; retry resends failures only', async () => {
-    const admin = await login('admin');
-    const today = await call('/api/attendance/today', { token: admin });
-    const sessionId = today.body.classes.find((c) => c.session && c.classId === 'cls-5').session.id;
-    const first = await call(`/api/messages/attendance/${sessionId}`, { token: admin, method: 'POST', body: { statuses: ['present', 'absent', 'late', 'leave'] } });
-    assert.equal(first.status, 201);
-    const again = await call(`/api/messages/attendance/${sessionId}`, { token: admin, method: 'POST', body: {} });
-    assert.equal(again.status, 200);
-    assert.equal(again.body.created, false);
-    assert.equal(again.body.batch.id, first.body.batch.id);
-
-    // Wait for the (sped-up) simulation to settle.
-    await new Promise((r) => setTimeout(r, 300));
-    const settled = (await call(`/api/messages/batches/${first.body.batch.id}`, { token: admin })).body;
-    const okBefore = Object.fromEntries(settled.recipients.filter((r) => r.status !== 'failed').map((r) => [r.id, r.attempts]));
-    const retry = await call(`/api/messages/batches/${first.body.batch.id}/retry`, { token: admin, method: 'POST' });
-    assert.equal(retry.body.retried, settled.stats.failed);
-    await new Promise((r) => setTimeout(r, 300));
-    const finalBatch = (await call(`/api/messages/batches/${first.body.batch.id}`, { token: admin })).body;
-    assert.equal(finalBatch.stats.failed, 0);
-    for (const r of finalBatch.recipients) {
-      if (r.id in okBefore) assert.equal(r.attempts, okBefore[r.id], 'successful recipients must not be resent');
-    }
+describe('attendance and messaging', () => {
+  test('one session per class per day (even if submitted at the same time); audited correction', async () => {
+    const roster = ok(await call(`/api/attendance/classes/${fx.class5}/roster`, { token: fx.staff })).students;
+    const records = Object.fromEntries(roster.map((s, i) => [s.id, i === 0 ? 'absent' : 'present']));
+    const [a, b] = await Promise.all([
+      call('/api/attendance/sessions', { token: fx.staff, method: 'POST', body: { classId: fx.class5, records } }),
+      call('/api/attendance/sessions', { token: fx.admin, method: 'POST', body: { classId: fx.class5, records } }),
+    ]);
+    assert.deepEqual([a.status, b.status].sort(), [201, 409]);
+    fx.sessionId = (a.status === 201 ? a : b).body.id ?? (a.status === 201 ? a.body.id : b.body.error.details.session.id);
+    assert.equal((await call(`/api/attendance/sessions/${fx.sessionId}`, { token: fx.staff, method: 'PATCH', body: { note: 'x', records: {} } })).status, 403);
+    const fixed = ok(await call(`/api/attendance/sessions/${fx.sessionId}`, { token: fx.admin, method: 'PATCH', body: { note: 'Came late', records: { [roster[0].id]: 'late' } } }));
+    assert.equal(fixed.counts.late, 1);
+    assert.match(fixed.audit[0].note, /1 record changed/);
   });
 
-  test('staff never see fee reminder batches', async () => {
-    const sneha = await login('staff', 'stf-1');
-    const list = await call('/api/messages/batches', { token: sneha });
-    assert.ok(list.body.every((b) => b.category !== 'feeReminder'));
-    assert.equal((await call('/api/messages/batches/bat-4', { token: sneha })).status, 404);
+  test('notification batch is idempotent; retry resends failures only', async () => {
+    const first = ok(await call(`/api/messages/attendance/${fx.sessionId}`, { token: fx.admin, method: 'POST', body: { statuses: ['present', 'absent', 'late', 'leave'] } }), 201);
+    const again = ok(await call(`/api/messages/attendance/${fx.sessionId}`, { token: fx.admin, method: 'POST', body: {} }));
+    assert.equal(again.created, false);
+    assert.equal(again.batch.id, first.batch.id);
+    await new Promise((r) => setTimeout(r, 400));
+    const settled = ok(await call(`/api/messages/batches/${first.batch.id}`, { token: fx.admin }));
+    assert.equal(settled.stats.pending, 0);
+    const okAttempts = Object.fromEntries(settled.recipients.filter((x) => x.status !== 'failed').map((x) => [x.id, x.attempts]));
+    ok(await call(`/api/messages/batches/${first.batch.id}/retry`, { token: fx.admin, method: 'POST' }));
+    await new Promise((r) => setTimeout(r, 400));
+    const done = ok(await call(`/api/messages/batches/${first.batch.id}`, { token: fx.admin }));
+    assert.equal(done.stats.failed, 0);
+    for (const x of done.recipients) if (x.id in okAttempts) assert.equal(x.attempts, okAttempts[x.id]);
   });
 });
 
-describe('fees', () => {
-  test('payments are appended and validated against the balance', async () => {
-    const admin = await login('admin');
-    const fee = (await call('/api/students/STU-0001/fees', { token: admin })).body.find((f) => f.yearLabel === '2026–27');
+describe('fees, exams, promotion', () => {
+  test('payments append and cannot exceed the balance', async () => {
+    const fee = ok(await call(`/api/students/${fx.students[0]}/fees`, { token: fx.admin }))[0];
     assert.equal(fee.summary.agreed, 12000);
-    const tooMuch = await call('/api/fees/payments', { token: admin, method: 'POST', body: { enrollmentId: fee.enrollmentId, amount: fee.summary.outstanding + 1, method: 'cash' } });
-    assert.equal(tooMuch.status, 400);
-    const ok = await call('/api/fees/payments', { token: admin, method: 'POST', body: { enrollmentId: fee.enrollmentId, amount: 500, method: 'upi' } });
-    assert.equal(ok.status, 201);
-    assert.equal(ok.body.summary.outstanding, fee.summary.outstanding - 500);
-    const after = (await call(`/api/fees/enrollments/${fee.enrollmentId}`, { token: admin })).body;
-    assert.equal(after.payments.length, fee.payments.length + 1);
+    assert.equal(fee.summary.paid, 2000);
+    assert.equal((await call('/api/fees/payments', { token: fx.admin, method: 'POST', body: { enrollmentId: fee.enrollmentId, amount: 10001, method: 'upi' } })).status, 400);
+    const paid = ok(await call('/api/fees/payments', { token: fx.admin, method: 'POST', body: { enrollmentId: fee.enrollmentId, amount: 1500, method: 'upi' } }), 201);
+    assert.equal(paid.summary.outstanding, 8500);
   });
-});
 
-describe('promotion', () => {
-  test('adds an enrollment, keeps the student and last year fee, never duplicates', async () => {
-    const admin = await login('admin');
-    const body = { fromYearId: 'ay-2026', toYearId: 'ay-2027', toClassId: 'cls-6', studentIds: ['STU-0002'], annualFee: 13000, installments: 4 };
-    const r1 = await call('/api/promotions', { token: admin, method: 'POST', body });
-    assert.equal(r1.status, 201);
-    assert.equal(r1.body.promoted.length, 1);
-    const r2 = await call('/api/promotions', { token: admin, method: 'POST', body });
-    assert.deepEqual(r2.body.skipped, ['STU-0002']);
-    const fees = (await call('/api/students/STU-0002/fees', { token: admin })).body;
-    assert.equal(fees.find((f) => f.yearLabel === '2027–28').plan.annualFee, 13000);
-    assert.equal(fees.find((f) => f.yearLabel === '2026–27').plan.annualFee, 12000);
-    const profile = (await call('/api/students/STU-0002', { token: admin })).body;
-    assert.equal(profile.student.id, 'STU-0002');
+  test('exam totals computed from marks; validation; publish; correction bumps revision', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const exam = ok(await call('/api/exams', { token: fx.staff, method: 'POST', body: { name: 'Weekly Test', classId: fx.class5, date: today, subjects: [{ subjectId: fx.math, maxMarks: 50 }] } }), 201);
+    assert.equal((await call(`/api/exams/${exam.id}/marks/${fx.math}`, { token: fx.staff, method: 'PUT', body: { entries: { [fx.students[0]]: { marks: 51 } } } })).status, 400);
+    assert.equal((await call(`/api/exams/${exam.id}/publish`, { token: fx.staff, method: 'POST' })).status, 400);
+    ok(await call(`/api/exams/${exam.id}/marks/${fx.math}`, { token: fx.staff, method: 'PUT', body: { entries: { [fx.students[0]]: { marks: 42 }, [fx.students[1]]: { absent: true }, [fx.students[2]]: { marks: 36 } } } }));
+    ok(await call(`/api/exams/${exam.id}/publish`, { token: fx.staff, method: 'POST' }));
+    const d = ok(await call(`/api/exams/${exam.id}`, { token: fx.admin }));
+    const g = d.results.find((x) => x.studentId === fx.students[0]);
+    assert.equal(g.obtained, 42);
+    assert.equal(g.percent, 84);
+    assert.equal(d.results.find((x) => x.studentId === fx.students[1]).subjects[0].absent, true);
+    assert.equal((await call(`/api/exams/${exam.id}/marks/${fx.math}`, { token: fx.admin, method: 'PUT', body: { entries: { [fx.students[0]]: { marks: 43 } } } })).status, 400);
+    assert.equal(ok(await call(`/api/exams/${exam.id}/marks/${fx.math}`, { token: fx.admin, method: 'PUT', body: { entries: { [fx.students[0]]: { marks: 43 } }, correctionNote: 'Re-totalled' } })).revision, 1);
   });
-});
 
-describe('exams', () => {
-  test('result totals are computed; marks are validated; publish requires all marks', async () => {
-    const admin = await login('admin');
-    const exam = (await call('/api/exams/exm-1', { token: admin })).body;
-    const ganesh = exam.results.find((r) => r.studentId === 'STU-0001');
-    assert.equal(ganesh.obtained, 126);
-    assert.equal(ganesh.maxTotal, 150);
-    assert.equal(ganesh.percent, 84);
-
-    const tooHigh = await call('/api/exams/exm-2/marks/sub-math', { token: admin, method: 'PUT', body: { entries: { [exam.students[0].id]: { marks: 99 } } } });
-    assert.equal(tooHigh.status, 400);
-    const publish = await call('/api/exams/exm-2/publish', { token: admin, method: 'POST' });
-    assert.equal(publish.status, 400);
-
-    // Correcting published marks needs a note and bumps the revision.
-    const noNote = await call('/api/exams/exm-1/marks/sub-eng', { token: admin, method: 'PUT', body: { entries: exam.marks['sub-eng'] } });
-    assert.equal(noNote.status, 400);
-    const fixed = await call('/api/exams/exm-1/marks/sub-eng', { token: admin, method: 'PUT', body: { entries: exam.marks['sub-eng'], correctionNote: 'Re-totalled' } });
-    assert.equal(fixed.body.revision, 1);
+  test('promotion adds an enrollment; keeps ID and last year\'s fee; no duplicates', async () => {
+    const next = ok(await call('/api/academic-years', { token: fx.admin, method: 'POST', body: { label: 'Next year', startDate: '2099-06-01', endDate: '2100-04-30' } }), 201);
+    const body = { fromYearId: fx.yearId, toYearId: next.id, toClassId: fx.class6, studentIds: [fx.students[0]], annualFee: 13000, installments: 4 };
+    assert.equal(ok(await call('/api/promotions', { token: fx.admin, method: 'POST', body }), 201).promoted.length, 1);
+    assert.deepEqual(ok(await call('/api/promotions', { token: fx.admin, method: 'POST', body }), 201).skipped, [fx.students[0]]);
+    const fees = ok(await call(`/api/students/${fx.students[0]}/fees`, { token: fx.admin }));
+    assert.deepEqual(fees.map((f) => f.plan?.annualFee), [12000, 13000]);
   });
 });

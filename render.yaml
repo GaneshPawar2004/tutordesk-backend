@@ -1,0 +1,21 @@
+# Render Blueprint: New > Blueprint > pick this repo.
+services:
+  - type: web
+    name: tutordesk-backend
+    runtime: node
+    region: singapore # same region as the Neon database
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: NEON_DB_URL
+        sync: false # paste the Neon connection string when asked
+      - key: TOKEN_SECRET
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        sync: false # the Vercel website address, e.g. https://tutordesk.vercel.app

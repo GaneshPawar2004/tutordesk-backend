@@ -2,7 +2,7 @@
   "name": "tuition-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Tuition management API (Phase 2 foundation: in-memory store, demo auth)",
+  "description": "TutorDesk tuition management API (Express + Postgres)",
   "type": "module",
   "main": "src/server.js",
   "engines": {

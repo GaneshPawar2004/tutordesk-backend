@@ -12,18 +12,26 @@ import { staffRoutes } from './routes/staff.js';
 import { studentRoutes } from './routes/students.js';
 import { syncRoutes } from './routes/sync.js';
 import { createMessaging } from './services/messaging.js';
+import { rateLimit } from './middleware/rate-limit.js';
 
-export function createApp({ db, secret, simulateSms = true, smsSpeed = 1 }) {
+export function createApp({ db, secret, simulateSms = true, smsSpeed = 1, allowedOrigins = [] }) {
   if (!secret) throw new Error('createApp requires a token secret');
   if (!db) throw new Error('createApp requires a database');
   const messaging = createMessaging(db, { simulate: simulateSms, speed: smsSpeed });
   const app = express();
 
   app.disable('x-powered-by');
+  app.set('trust proxy', 1); // behind Render's proxy: req.ip is the real client
   app.use(express.json({ limit: '300kb' }));
-  // Allow the web app (dev server or another origin) and the mobile app to call the API.
+  // Browsers: only the listed web origins (any origin when the list is empty,
+  // e.g. local dev). The mobile app sends no Origin header and is unaffected.
   app.use((req, res, next) => {
-    res.set('Access-Control-Allow-Origin', req.get('origin') ?? '*');
+    const origin = req.get('origin');
+    if (origin && allowedOrigins.length && !allowedOrigins.includes(origin)) {
+      return res.status(403).json({ error: { code: 'forbidden_origin', message: 'This website may not use the API' } });
+    }
+    res.set('Access-Control-Allow-Origin', origin ?? '*');
+    res.set('Vary', 'Origin');
     res.set('Access-Control-Allow-Headers', 'content-type, authorization');
     res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -34,7 +42,7 @@ export function createApp({ db, secret, simulateSms = true, smsSpeed = 1 }) {
     await db.query('select 1');
     res.json({ ok: true, database: 'connected' });
   });
-  app.use('/api/auth', authRoutes(db, secret));
+  app.use('/api/auth', rateLimit({ windowMs: 15 * 60_000, max: 30 }), authRoutes(db, secret));
 
   const api = express.Router();
   api.use(authenticate(db, secret));

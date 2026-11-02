@@ -20,6 +20,7 @@ const config = {
     pass: env.SMTP_PASS || '',
     from: env.MAIL_FROM || 'Kaksha <no-reply@example.com>',
   },
+  brevoApiKey: env.BREVO_API_KEY || '',
   trialDays: Number(env.TRIAL_DAYS) || 14,
   defaultStaffLoginLimit: Number(env.DEFAULT_STAFF_LOGIN_LIMIT) || 0,
   adminApiKey: env.ADMIN_API_KEY || '',

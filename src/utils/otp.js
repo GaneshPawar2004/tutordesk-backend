@@ -35,7 +35,19 @@ async function issueOtp(email, purpose) {
        set code_hash = excluded.code_hash, attempts = 0, sent_at = now(), expires_at = excluded.expires_at`,
     [email, purpose, hash(email, purpose, code), new Date(Date.now() + config.otp.ttlMinutes * 60 * 1000)],
   );
-  await sendOtpEmail(email, code, purpose);
+  try {
+    await sendOtpEmail(email, code, purpose);
+  } catch (err) {
+    console.error(`OTP email to ${email} failed:`, err.code || '', err.message);
+    // Let the user retry right away instead of waiting out the cooldown.
+    await db.query('delete from otps where email = $1 and purpose = $2', [email, purpose]);
+    throw new ApiError(
+      502,
+      'EMAIL_FAILED',
+      'We could not send the verification email. Please try again in a few minutes.',
+      [{ reason: err.code || 'unknown' }],
+    );
+  }
 }
 
 /** Checks the code; deletes the OTP on success. Throws on failure. */

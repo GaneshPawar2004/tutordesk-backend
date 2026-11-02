@@ -64,9 +64,15 @@ router.post('/register', validate(registerSchema), async (req, res) => {
   const { name, email, mobile, password } = req.body;
   const referralCode = req.body.referralCode || '';
 
-  const byMobile = await db.one('select email from users where mobile = $1', [mobile]);
+  const byMobile = await db.one('select * from users where mobile = $1', [mobile]);
   if (byMobile && byMobile.email !== email) {
-    throw conflict('This mobile number is already registered', 'MOBILE_TAKEN');
+    if (byMobile.email_verified || byMobile.role !== 'owner') {
+      throw conflict('This mobile number is already registered', 'MOBILE_TAKEN');
+    }
+    // An unfinished signup (e.g. a mistyped email) must not hold the number:
+    // drop it with its empty institute.
+    await db.query('delete from institutes where id = $1', [byMobile.institute_id]);
+    await db.query("delete from otps where email = $1 and purpose = 'signup'", [byMobile.email]);
   }
 
   const user = await userByEmail(email);

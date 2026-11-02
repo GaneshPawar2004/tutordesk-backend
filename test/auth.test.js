@@ -55,6 +55,27 @@ describe('auth', () => {
     assert.equal(dupMobile.body.error.code, 'MOBILE_TAKEN');
   });
 
+  it('lets a retry with a corrected email reuse the mobile of an unverified signup', async () => {
+    await api()
+      .post('/api/v1/auth/register')
+      .send({ name: 'Typo', email: 'typo@exmaple.com', mobile: '9111111111', password: 'secret1' })
+      .expect(201);
+    await api()
+      .post('/api/v1/auth/register')
+      .send({ name: 'Typo', email: 'fixed@example.com', mobile: '9111111111', password: 'secret1' })
+      .expect(201);
+    await api()
+      .post('/api/v1/auth/verify-email')
+      .send({ email: 'fixed@example.com', code: lastOtp('fixed@example.com') })
+      .expect(200);
+    // The abandoned signup is gone.
+    const old = await api()
+      .post('/api/v1/auth/verify-email')
+      .send({ email: 'typo@exmaple.com', code: lastOtp('typo@exmaple.com') })
+      .expect(400);
+    assert.match(old.body.error.message, /No signup found/);
+  });
+
   it('validates input', async () => {
     const res = await api()
       .post('/api/v1/auth/register')

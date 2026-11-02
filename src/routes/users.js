@@ -8,22 +8,8 @@ const { findOwned } = require('../utils/scope');
 const { conflict, forbidden } = require('../utils/errors');
 const s = require('../utils/schemas');
 
-/** Staff logins. Mounted behind requireOwner. */
+/** Staff logins (free and unlimited). Mounted behind requireOwner. */
 const router = express.Router();
-
-const PLAN_MESSAGE =
-  'Your plan does not include more staff logins. Add staff logins for ₹500/user per year from Subscriptions.';
-
-async function planInfo(instituteId) {
-  const row = await db.one(
-    `select i.staff_login_limit,
-       (select count(*)::int from users u
-          where u.institute_id = i.id and u.role = 'staff' and u.active) as active_count
-     from institutes i where i.id = $1`,
-    [instituteId],
-  );
-  return { staffLoginLimit: row.staff_login_limit, activeCount: row.active_count };
-}
 
 async function assertEmailFree(email, exceptId) {
   const clash = await db.one('select id from users where email = $1 and id is distinct from $2', [
@@ -38,7 +24,10 @@ router.get('/', async (req, res) => {
     "select * from users where institute_id = $1 and role = 'staff' order by created_at",
     [req.instituteId],
   );
-  res.json({ ...(await planInfo(req.instituteId)), users: users.map(User.toPublic) });
+  res.json({
+    activeCount: users.filter((u) => u.active).length,
+    users: users.map(User.toPublic),
+  });
 });
 
 const staffFields = {
@@ -57,14 +46,12 @@ router.post(
   async (req, res) => {
     const { password, ...rest } = req.body;
     await assertEmailFree(rest.email);
-    // New logins start active only while the plan has free slots.
-    const { staffLoginLimit, activeCount } = await planInfo(req.instituteId);
     const data = {
       ...db.toColumns(rest, User.COLUMNS),
       institute_id: req.instituteId,
       role: 'staff',
       email_verified: true,
-      active: activeCount < staffLoginLimit,
+      active: true,
       password_hash: await bcrypt.hash(password, 10),
     };
     const user = await db.one(...db.insertSql('users', data));
@@ -81,10 +68,6 @@ router.patch(
     const { password, active, ...rest } = req.body;
 
     if (rest.email) await assertEmailFree(rest.email, user.id);
-    if (active === true && !user.active) {
-      const { staffLoginLimit, activeCount } = await planInfo(req.instituteId);
-      if (activeCount >= staffLoginLimit) throw forbidden(PLAN_MESSAGE, 'PLAN_LIMIT');
-    }
     const changes = db.toColumns(rest, User.COLUMNS);
     if (active !== undefined) changes.active = active;
     if (password) {

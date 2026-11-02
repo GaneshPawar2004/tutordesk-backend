@@ -27,25 +27,25 @@ idempotent). IDs are UUIDs.
 ## Accounts and permissions
 
 - **Owner**: signs up in the app; gets an *institute* with a 14-day trial. Sees everything.
-- **Staff**: created by the owner (Users screen). Can only sign in while **active**, and the
-  number of active staff is limited by the institute's `staffLoginLimit` (default 0).
+- **Staff**: created by the owner (Users screen). Staff logins are free and unlimited; new staff start
+  **active**, and the owner can block/unblock them.
   Staff can manage classes, students, attendance and tests. They see and collect fees only
   with **Can access Fees**. Deleting classes/students and managing users is owner-only.
 - All data is scoped to the institute; other institutes' records always return 404.
 
-To raise a teacher's staff limit after they pay (set `ADMIN_API_KEY` in `.env` first):
+To extend a teacher's trial (set `ADMIN_API_KEY` in `.env` first):
 
 ```bash
 curl "localhost:4000/api/v1/admin/institutes?email=teacher@example.com" -H "x-admin-key: KEY"
 curl -X PATCH localhost:4000/api/v1/admin/institutes/<instituteId> \
   -H "x-admin-key: KEY" -H "Content-Type: application/json" \
-  -d '{"staffLoginLimit": 2, "extendTrialDays": 30}'
+  -d '{"extendTrialDays": 30}'
 ```
 
 ## API
 
 Send `Authorization: Bearer <token>` on every route except `/auth/*` (other than `/auth/me`).
-Errors look like `{ "error": { "code": "PLAN_LIMIT", "message": "...", "details": [...] } }`.
+Errors look like `{ "error": { "code": "NOT_FOUND", "message": "...", "details": [...] } }`.
 Dates are `YYYY-MM-DD`; money is in rupees.
 
 | Method | Path | Notes |
@@ -72,7 +72,7 @@ Dates are `YYYY-MM-DD`; money is in rupees.
 | GET | `/fees/dues` | pending fees across classes *(fee access)* |
 | GET / POST | `/students/:id/fees/payments` | history / `{amount, note?, paidAt?}`; rejects overpayment *(fee access)* |
 | GET | `/reports` | attendance % and fee summary per class |
-| GET / POST | `/users` | staff list with `activeCount`, `staffLoginLimit` / create *(owner)* |
+| GET / POST | `/users` | staff list with `activeCount` / create *(owner)* |
 | PATCH / DELETE | `/users/:id` | edit, `active` (plan-limited), new password *(owner)* |
 
 SMS is not handled by the server: the app opens the phone's SMS app and sends from the

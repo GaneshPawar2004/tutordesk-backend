@@ -163,31 +163,26 @@ describe('classes, students, attendance, tests, fees, reports', () => {
     assert.equal(mine.body.classes.length, 0);
   });
 
-  it('staff: plan limit, blocking, fee permission, owner-only actions', async () => {
+  it('staff: free logins, blocking, fee permission, owner-only actions', async () => {
     const created = await api()
       .post('/api/v1/users')
       .set(H)
       .send({ name: 'Tanmay', email: 'tanmay@example.com', password: 'secret1' })
       .expect(201);
     const staff = created.body.user;
-    assert.equal(staff.active, false); // plan includes 0 staff logins
+    assert.equal(staff.active, true); // staff logins are free and unlimited
 
+    // Blocking and unblocking is up to the owner.
+    await api().patch(`/api/v1/users/${staff.id}`).set(H).send({ active: false }).expect(200);
     const blocked = await api()
       .post('/api/v1/auth/login')
       .send({ identifier: 'tanmay@example.com', password: 'secret1' })
       .expect(403);
     assert.equal(blocked.body.error.code, 'ACCOUNT_BLOCKED');
-
-    const limit = await api().patch(`/api/v1/users/${staff.id}`).set(H).send({ active: true }).expect(403);
-    assert.equal(limit.body.error.code, 'PLAN_LIMIT');
-
-    // You raise the limit with the admin API after the teacher pays.
-    await api()
-      .patch(`/api/v1/admin/institutes/${owner.institute.id}`)
-      .set('x-admin-key', 'test-admin-key')
-      .send({ staffLoginLimit: 1 })
-      .expect(200);
     await api().patch(`/api/v1/users/${staff.id}`).set(H).send({ active: true }).expect(200);
+
+    const list = await api().get('/api/v1/users').set(H).expect(200);
+    assert.equal(list.body.activeCount, 1);
 
     const login = await api()
       .post('/api/v1/auth/login')

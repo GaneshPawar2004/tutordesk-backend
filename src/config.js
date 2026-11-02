@@ -20,6 +20,11 @@ const config = {
     pass: env.SMTP_PASS || '',
     from: env.MAIL_FROM || 'Kaksha <no-reply@example.com>',
   },
+  gmail: {
+    clientId: env.GMAIL_CLIENT_ID || '',
+    clientSecret: env.GMAIL_CLIENT_SECRET || '',
+    refreshToken: env.GMAIL_REFRESH_TOKEN || '',
+  },
   trialDays: Number(env.TRIAL_DAYS) || 14,
   defaultStaffLoginLimit: Number(env.DEFAULT_STAFF_LOGIN_LIMIT) || 0,
   adminApiKey: env.ADMIN_API_KEY || '',

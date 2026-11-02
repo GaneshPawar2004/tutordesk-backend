@@ -24,6 +24,8 @@ function createApp() {
     res.json({ ok: true, database: 'connected' });
   });
 
+  app.use('/', require('./routes/pages'));
+
   const api = express.Router();
   api.use('/auth', require('./routes/auth'));
   api.use('/admin', require('./routes/admin'));

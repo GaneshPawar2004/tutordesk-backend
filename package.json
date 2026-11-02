@@ -11,7 +11,8 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "dev:memory": "node --watch src/dev-memory.js",
-    "test": "node --test --test-concurrency=1 \"test/*.test.js\""
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "gmail-auth": "node scripts/gmail-auth.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

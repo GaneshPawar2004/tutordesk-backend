@@ -2,7 +2,8 @@ const nodemailer = require('nodemailer');
 const config = require('../config');
 
 let transporter = null;
-if (config.smtp.host) {
+// Tests never send real email, even when .env has SMTP settings.
+if (config.smtp.host && !config.isTest) {
   transporter = nodemailer.createTransport({
     host: config.smtp.host,
     port: config.smtp.port,

@@ -77,6 +77,7 @@ router.get('/reports', async (req, res) => {
         name: c.name,
         studentCount: c.student_count,
         records: total,
+        counts: t,
         presentPercent: pct(t.present),
         absentPercent: pct(t.absent),
         leavePercent: pct(t.leave),

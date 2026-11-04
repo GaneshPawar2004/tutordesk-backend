@@ -5,7 +5,7 @@ const morgan = require('morgan');
 
 const config = require('./config');
 const db = require('./db');
-const { requireAuth, requireOwner } = require('./middleware/auth');
+const { requireAuth, requireAccess, requireOwner } = require('./middleware/auth');
 const { notFoundHandler, errorHandler } = require('./middleware/error');
 
 function createApp() {
@@ -32,6 +32,9 @@ function createApp() {
 
   // Everything below needs a signed-in user.
   api.use(requireAuth);
+  api.use('/account', require('./routes/account'));
+  // ...and an institute whose trial/plan is running (see utils/access.js).
+  api.use(requireAccess);
   api.use('/', require('./routes/overview'));
   api.use('/classes', require('./routes/classes'));
   api.use('/classes/:classId/attendance', require('./routes/attendance'));

@@ -28,6 +28,9 @@ const config = {
   trialDays: Number(env.TRIAL_DAYS) || 14,
   defaultStaffLoginLimit: Number(env.DEFAULT_STAFF_LOGIN_LIMIT) || 0,
   adminApiKey: env.ADMIN_API_KEY || '',
+  // Shown in the app when a tuition's trial or plan has ended.
+  supportPhone: env.SUPPORT_PHONE || '',
+  supportEmail: env.SUPPORT_EMAIL || 'ganeshpawardev@gmail.com',
   otp: { length: 6, ttlMinutes: 10, maxAttempts: 5, resendSeconds: 30 },
 };
 

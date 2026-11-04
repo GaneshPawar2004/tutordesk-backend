@@ -8,6 +8,7 @@ const User = require('../models/User');
 const validate = require('../middleware/validate');
 const { requireAuth } = require('../middleware/auth');
 const { issueOtp, consumeOtp } = require('../utils/otp');
+const { accessOf, support } = require('../utils/access');
 const { isId } = require('../utils/scope');
 const { signAuthToken, signResetToken, verifyToken } = require('../utils/tokens');
 const { ApiError, badRequest, conflict, forbidden } = require('../utils/errors');
@@ -31,13 +32,19 @@ const hashPassword = (pw) => bcrypt.hash(pw, 10);
 async function instituteSummary(instituteId) {
   const inst = await db.one('select * from institutes where id = $1', [instituteId]);
   if (!inst) return null;
-  const msLeft = inst.trial_ends_at.getTime() - Date.now();
+  const access = accessOf(inst);
   return {
     id: inst.id,
     name: inst.name,
     trialEndsAt: inst.trial_ends_at,
-    trialDaysRemaining: Math.max(0, Math.ceil(msLeft / 86400000)),
-    staffLoginLimit: inst.staff_login_limit,
+    trialDaysRemaining: access.trialDaysRemaining,
+    access: {
+      status: access.status,
+      allowed: access.allowed,
+      accessUntil: access.accessUntil,
+      ...(access.allowed ? {} : { code: access.code, message: access.message }),
+    },
+    support: support(),
   };
 }
 

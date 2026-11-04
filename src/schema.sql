@@ -164,3 +164,23 @@ create or replace trigger tests_touch before update on tests
   for each row execute function touch_updated_at();
 create or replace trigger fee_payments_touch before update on fee_payments
   for each row execute function touch_updated_at();
+
+-- ---- Access control (set from the admin page) ---------------------------------
+-- trial: allowed until trial_ends_at; active: allowed until access_until (null = no end);
+-- blocked: no access. Applies to the owner and all staff of the institute.
+alter table institutes add column if not exists access_status text not null default 'trial';
+alter table institutes add column if not exists access_until timestamptz;
+do $$ begin
+  alter table institutes add constraint institutes_access_status_check
+    check (access_status in ('trial', 'active', 'blocked'));
+exception when duplicate_object then null;
+end $$;
+
+-- ---- Student photos -------------------------------------------------------------
+alter table students add column if not exists photo_updated_at timestamptz;
+
+create table if not exists student_photos (
+  student_id uuid primary key references students (id) on delete cascade,
+  mime text not null,
+  image bytea not null
+);

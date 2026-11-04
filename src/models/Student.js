@@ -15,6 +15,8 @@ function toPublic(st, withFees = true) {
     email: st.email,
     dateOfBirth: st.date_of_birth,
     disabled: st.disabled,
+    // Changes whenever the photo changes (null = no photo); fetch GET /students/:id/photo.
+    photoUpdatedAt: st.photo_updated_at ?? null,
     createdAt: st.created_at,
   };
   if (withFees) {

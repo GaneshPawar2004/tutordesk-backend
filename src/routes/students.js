@@ -5,7 +5,7 @@ const Student = require('../models/Student');
 const validate = require('../middleware/validate');
 const { requireOwner, canAccessFees } = require('../middleware/auth');
 const { findOwned } = require('../utils/scope');
-const { conflict, forbidden } = require('../utils/errors');
+const { badRequest, conflict, forbidden, notFound } = require('../utils/errors');
 const s = require('../utils/schemas');
 
 const router = express.Router();
@@ -86,6 +86,56 @@ router.delete('/students/:id', requireOwner, async (req, res) => {
   const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
   await db.query('delete from students where id = $1', [st.id]);
   res.status(204).end();
+});
+
+// ---- Photo ------------------------------------------------------------------
+const MAX_PHOTO_BYTES = 500 * 1024;
+
+/** Image type from its first bytes (only JPEG and PNG are accepted). */
+function imageMime(buf) {
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length > 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  return null;
+}
+
+/** Body: { image: base64 JPEG/PNG } (the app shrinks photos before upload). */
+router.put(
+  '/students/:id/photo',
+  validate(s.z.object({ image: s.z.string().min(10).max(800 * 1024) })),
+  async (req, res) => {
+    const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
+    const buf = Buffer.from(req.body.image, 'base64');
+    const mime = imageMime(buf);
+    if (!mime) throw badRequest('Photo must be a JPEG or PNG image');
+    if (buf.length > MAX_PHOTO_BYTES) throw badRequest('Photo is too large (max 500 KB)');
+    const updated = await db.tx(async (t) => {
+      await t.query(
+        `insert into student_photos (student_id, mime, image) values ($1, $2, $3)
+         on conflict (student_id) do update set mime = excluded.mime, image = excluded.image`,
+        [st.id, mime, buf],
+      );
+      return t.one('update students set photo_updated_at = now() where id = $1 returning *', [st.id]);
+    });
+    res.json({ student: Student.toPublic(updated, canAccessFees(req.user)) });
+  },
+);
+
+router.get('/students/:id/photo', async (req, res) => {
+  const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
+  const photo = await db.one('select mime, image from student_photos where student_id = $1', [st.id]);
+  if (!photo) throw notFound('Photo');
+  // The URL carries ?v=photoUpdatedAt, so a changed photo gets a new URL.
+  res.set('Cache-Control', 'private, max-age=31536000, immutable');
+  res.type(photo.mime).send(Buffer.from(photo.image));
+});
+
+router.delete('/students/:id/photo', async (req, res) => {
+  const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
+  await db.query('delete from student_photos where student_id = $1', [st.id]);
+  const updated = await db.one('update students set photo_updated_at = null where id = $1 returning *', [st.id]);
+  res.json({ student: Student.toPublic(updated, canAccessFees(req.user)) });
 });
 
 /** Attendance history (newest first) with a summary. */

@@ -41,6 +41,7 @@ function createApp() {
   api.use('/', require('./routes/students'));
   api.use('/', require('./routes/tests'));
   api.use('/', require('./routes/fees'));
+  api.use('/', require('./routes/sms'));
   api.use('/users', requireOwner, require('./routes/users'));
 
   app.use('/api/v1', api);

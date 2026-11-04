@@ -98,3 +98,14 @@ Amazon SES) so OTPs reach real inboxes.
 
 - `GET /api/ping`: keep-alive for uptime pingers; never touches the database.
 - `GET /api/health`: Render's health check; also runs `select 1`.
+
+## Parent SMS queue
+
+SMS go out from the teachers' own SIMs (the app), but every "send to all" list is first
+saved on the server (`POST /sms/batches`). Each phone claims messages
+(`POST /sms/claim {batch, limit}`, reserved for 10 minutes so two phones never send the same
+one), reports each result (`POST /sms/:id/report {status: sent|failed}`) and gives back what
+it could not send (`POST /sms/release {ids}`), e.g. when its daily SMS limit is used up.
+`GET /sms/batches` lists the last 7 days with sent/remaining counts and who sent them;
+`GET /sms/batches/:id` shows every student's status; unsent messages expire after 2 days
+or can be dismissed (`POST /sms/batches/:id/dismiss`). Admin and all staff can use it.

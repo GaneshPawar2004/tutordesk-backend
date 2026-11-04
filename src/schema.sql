@@ -184,3 +184,36 @@ create table if not exists student_photos (
   mime text not null,
   image bytea not null
 );
+
+-- ---- Parent SMS queue -----------------------------------------------------------
+-- Every SMS the app sends from a teacher's SIM is recorded here first, so the admin
+-- and staff see what is still unsent (e.g. a phone hit its daily SMS limit) and any
+-- of them can send the rest from their own phone. A "batch" is one SEND TO ALL list.
+create table if not exists sms_batches (
+  id uuid primary key default gen_random_uuid(),
+  institute_id uuid not null references institutes (id) on delete cascade,
+  class_id uuid references classes (id) on delete set null,
+  kind text not null default 'other', -- absent | fees | marks | birthday | receipt | other
+  title text not null,
+  created_by uuid references users (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists sms_batches_institute_idx on sms_batches (institute_id, created_at);
+
+create table if not exists sms_messages (
+  id uuid primary key default gen_random_uuid(),
+  batch_id uuid not null references sms_batches (id) on delete cascade,
+  student_id uuid references students (id) on delete set null,
+  position integer not null,
+  name text not null,
+  phone text not null,
+  body text not null,
+  status text not null default 'pending' check (status in ('pending', 'sent', 'failed', 'dismissed')),
+  reason text,
+  channel text, -- sms | whatsapp | sms_app
+  claimed_by uuid references users (id) on delete set null,
+  claimed_until timestamptz,
+  sent_by uuid references users (id) on delete set null,
+  sent_at timestamptz
+);
+create index if not exists sms_messages_batch_idx on sms_messages (batch_id, status);

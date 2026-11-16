@@ -78,12 +78,22 @@ router.patch('/students/:id', validate(updateSchema), async (req, res) => {
   if ('rollNo' in req.body) await assertRollFree(st.class_id, req.body.rollNo, st.id);
   const changes = db.toColumns(req.body, Student.COLUMNS);
   if (Object.keys(changes).length) st = await db.one(...db.updateSql('students', st.id, changes));
+  if (req.body.disabled === true) await stopPendingSms(st.id);
   res.json({ student: Student.toPublic(st, canAccessFees(req.user)) });
 });
+
+/** Parents of disabled/deleted students must not get SMS still waiting in the queue. */
+const stopPendingSms = (studentId) =>
+  db.query(
+    `update sms_messages set status = 'dismissed', claimed_by = null, claimed_until = null
+     where student_id = $1 and status in ('pending', 'failed')`,
+    [studentId],
+  );
 
 // Payments, attendance records and marks of the student go with it (cascade).
 router.delete('/students/:id', requireOwner, async (req, res) => {
   const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
+  await stopPendingSms(st.id);
   await db.query('delete from students where id = $1', [st.id]);
   res.status(204).end();
 });

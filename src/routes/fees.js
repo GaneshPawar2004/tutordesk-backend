@@ -3,9 +3,9 @@ const express = require('express');
 const db = require('../db');
 const Student = require('../models/Student');
 const validate = require('../middleware/validate');
-const { requireFeeAccess } = require('../middleware/auth');
-const { findOwned } = require('../utils/scope');
-const { badRequest } = require('../utils/errors');
+const { requireFeeAccess, requireOwner } = require('../middleware/auth');
+const { findOwned, isId } = require('../utils/scope');
+const { badRequest, notFound } = require('../utils/errors');
 const s = require('../utils/schemas');
 
 const router = express.Router();
@@ -51,12 +51,36 @@ const paymentSchema = s.z.object({
   amount: s.z.number().positive('Enter a valid amount').max(1e9),
   note: s.z.string().trim().max(200).optional(),
   paidAt: s.nullableDate.optional(),
+  // Id the app makes per payment; a retry with the same id is not saved twice.
+  clientRef: s.z.string().trim().min(8).max(64).optional(),
+});
+
+const paymentToPublic = (p) => ({
+  id: p.id,
+  student: p.student_id,
+  amount: p.amount,
+  note: p.note,
+  paidAt: p.paid_at,
+  collectedBy: p.collected_by,
+  createdAt: p.created_at,
 });
 
 /** Records a payment. Rejected if it exceeds the pending amount. */
 router.post('/students/:id/fees/payments', validate(paymentSchema), async (req, res) => {
   const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
   const amount = round2(req.body.amount);
+  const { clientRef } = req.body;
+
+  // Same payment sent again (e.g. the first reply was lost on a slow network).
+  if (clientRef) {
+    const earlier = await db.one('select * from fee_payments where student_id = $1 and client_ref = $2', [
+      st.id,
+      clientRef,
+    ]);
+    if (earlier) {
+      return res.status(200).json({ payment: paymentToPublic(earlier), student: Student.toPublic(st) });
+    }
+  }
   if (st.total_fees <= 0) throw badRequest('Set total fees for this student first');
 
   const { payment, updated } = await db.tx(async (t) => {
@@ -68,24 +92,39 @@ router.post('/students/:id/fees/payments', validate(paymentSchema), async (req, 
     );
     if (!row) throw badRequest(`Amount exceeds due (₹${feesDue(st)})`);
     const p = await t.one(
-      `insert into fee_payments (institute_id, student_id, amount, note, paid_at, collected_by)
-       values ($1, $2, $3, $4, $5, $6) returning *`,
-      [req.instituteId, st.id, amount, req.body.note || '', req.body.paidAt || new Date(), req.user.id],
+      `insert into fee_payments (institute_id, student_id, amount, note, paid_at, collected_by, client_ref)
+       values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+      [
+        req.instituteId,
+        st.id,
+        amount,
+        req.body.note || '',
+        req.body.paidAt || new Date(),
+        req.user.id,
+        clientRef ?? null,
+      ],
     );
     return { payment: p, updated: row };
   });
-  res.status(201).json({
-    payment: {
-      id: payment.id,
-      student: payment.student_id,
-      amount: payment.amount,
-      note: payment.note,
-      paidAt: payment.paid_at,
-      collectedBy: payment.collected_by,
-      createdAt: payment.created_at,
-    },
-    student: Student.toPublic(updated),
+  res.status(201).json({ payment: paymentToPublic(payment), student: Student.toPublic(updated) });
+});
+
+/** Admin only: removes a wrong payment and lowers the student's paid amount. */
+router.delete('/students/:id/fees/payments/:paymentId', requireOwner, async (req, res) => {
+  const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
+  if (!isId(req.params.paymentId)) throw notFound('Payment');
+  const updated = await db.tx(async (t) => {
+    const p = await t.one('delete from fee_payments where id = $1 and student_id = $2 returning amount', [
+      req.params.paymentId,
+      st.id,
+    ]);
+    if (!p) throw notFound('Payment');
+    return t.one('update students set fees_paid = greatest(0, fees_paid - $2) where id = $1 returning *', [
+      st.id,
+      p.amount,
+    ]);
   });
+  res.json({ student: Student.toPublic(updated) });
 });
 
 router.get('/students/:id/fees/payments', async (req, res) => {

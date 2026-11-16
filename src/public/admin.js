@@ -74,7 +74,7 @@
           <button class="green" data-act="allow">Allow</button>
         </div>
         <div class="row">
-          <button class="ghost" data-act="trial7">+7 days trial</button>
+          ${it.status === 'trial' ? '<button class="ghost" data-act="trial7">+7 days trial</button>' : ''}
           <button class="red" data-act="block" ${it.status === 'blocked' ? 'disabled' : ''}>Block</button>
         </div>
       </div></td>
@@ -95,7 +95,8 @@
     let body;
     if (action === 'allow') {
       const days = tr.querySelector('[data-until]').value;
-      body = { action: 'allow', accessUntil: days ? new Date(Date.now() + days * 86400000).toISOString() : null };
+      // Days are added to a running plan by the server (renewing early keeps the rest).
+      body = days ? { action: 'allow', days: Number(days) } : { action: 'allow', accessUntil: null };
     } else if (action === 'block') {
       if (!confirm('Block this tuition? The owner and all staff will lose access.')) return;
       body = { action: 'block' };

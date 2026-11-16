@@ -83,7 +83,7 @@ describe('access control, admin page, account, photos', () => {
     const ext = await api()
       .patch(`/api/v1/admin/institutes/${owner.institute.id}`)
       .set(ADMIN)
-      .send({ extendTrialDays: 7 })
+      .send({ action: 'trial', extendTrialDays: 7 })
       .expect(200);
     assert.equal(ext.body.institute.status, 'trial');
     assert.equal(ext.body.institute.trialDaysRemaining, 7);

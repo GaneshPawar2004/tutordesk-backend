@@ -2,8 +2,10 @@ const express = require('express');
 
 const db = require('../db');
 const validate = require('../middleware/validate');
+const { canAccessFees } = require('../middleware/auth');
 const { findOwned, isId } = require('../utils/scope');
-const { badRequest, notFound } = require('../utils/errors');
+const { ApiError, badRequest, forbidden, notFound } = require('../utils/errors');
+const { FEE_KINDS, findOrCreateBatch, addMessages, batchMessages, messageToPublic } = require('../utils/smsQueue');
 const s = require('../utils/schemas');
 
 /**
@@ -14,31 +16,31 @@ const s = require('../utils/schemas');
  *
  * Claiming reserves messages for one phone for CLAIM_MINUTES so two people
  * never send the same SMS; unsent messages expire after PENDING_DAYS.
+ * Absence SMS lists are built from saved attendance (routes/attendance.js).
+ * Fee reminders and receipts (FEE_KINDS) are only for users with fee access.
  */
 const router = express.Router();
 
 const CLAIM_MINUTES = 10;
 const PENDING_DAYS = 2;
 
-const messageToPublic = (m) => ({
-  id: m.id,
-  batch: m.batch_id,
-  student: m.student_id,
-  name: m.name,
-  phone: m.phone,
-  body: m.body,
-  status: m.status,
-  reason: m.reason,
-  channel: m.channel,
-  sentBy: m.sent_by_name ?? null,
-  sentAt: m.sent_at,
-});
+/** SQL condition: batch b is visible to this user (fee lists need fee access). */
+const visibleKinds = (user) => (canAccessFees(user) ? 'true' : `b.kind not in ('${FEE_KINDS.join("', '")}')`);
+
+async function findBatch(req, id) {
+  const batch = await findOwned('sms_batches', id, req.instituteId, 'SMS list');
+  if (FEE_KINDS.includes(batch.kind) && !canAccessFees(req.user)) throw notFound('SMS list');
+  return batch;
+}
 
 // ---- Create a batch ----------------------------------------------------------
 const createSchema = s.z.object({
-  kind: s.z.enum(['absent', 'fees', 'marks', 'birthday', 'receipt', 'other']).default('other'),
+  kind: s.z.enum(['fees', 'marks', 'birthday', 'receipt', 'other']).default('other'),
   title: s.z.string().trim().min(1).max(150),
   classId: s.objectId.nullable().optional(),
+  // Same key → same list; students already in it are not added again
+  // (e.g. "fees:<class>:<day>", "marks:<test>:<day>", "birthday:<day>").
+  key: s.z.string().trim().min(3).max(200).optional(),
   messages: s.z
     .array(
       s.z.object({
@@ -52,8 +54,17 @@ const createSchema = s.z.object({
     .max(1000),
 });
 
+router.post('/sms/batches', async (req, res, next) => {
+  // Absence SMS must come from saved attendance: POST /classes/:id/attendance/sms.
+  if (req.body?.kind === 'absent') {
+    return next(new ApiError(400, 'UPDATE_APP', 'Please update the Kaksha app to send absence SMS.'));
+  }
+  next();
+});
+
 router.post('/sms/batches', validate(createSchema), async (req, res) => {
-  const { kind, title, classId, messages } = req.body;
+  const { kind, title, classId, key, messages } = req.body;
+  if (FEE_KINDS.includes(kind) && !canAccessFees(req.user)) throw forbidden('You do not have access to fees');
   if (classId) await findOwned('classes', classId, req.instituteId, 'Class');
   const studentIds = [...new Set(messages.map((m) => m.student).filter(Boolean))];
   if (studentIds.length) {
@@ -64,26 +75,20 @@ router.post('/sms/batches', validate(createSchema), async (req, res) => {
     if (n !== studentIds.length) throw badRequest('Some students were not found');
   }
 
-  const result = await db.tx(async (t) => {
-    const batch = await t.one(
-      `insert into sms_batches (institute_id, class_id, kind, title, created_by)
-       values ($1, $2, $3, $4, $5) returning *`,
-      [req.instituteId, classId ?? null, kind, title, req.user.id],
-    );
-    const params = [batch.id];
-    const rows = messages.map((m, i) => {
-      params.push(m.student ?? null, i, m.name, m.phone, m.body);
-      const p = params.length;
-      return `($1, $${p - 4}, $${p - 3}, $${p - 2}, $${p - 1}, $${p})`;
+  const batch = await db.tx(async (t) => {
+    const b = await findOrCreateBatch(t, {
+      instituteId: req.instituteId,
+      classId,
+      kind,
+      title,
+      key,
+      userId: req.user.id,
     });
-    const inserted = await t.query(
-      `insert into sms_messages (batch_id, student_id, position, name, phone, body)
-       values ${rows.join(', ')} returning *`,
-      params,
-    );
-    return { batch, inserted: inserted.sort((a, b) => a.position - b.position) };
+    await addMessages(t, b.id, messages);
+    return b;
   });
-  res.status(201).json({ batch: result.batch.id, messages: result.inserted.map(messageToPublic) });
+  const rows = await batchMessages(db, batch.id);
+  res.status(201).json({ batch: batch.id, messages: rows.map(messageToPublic) });
 });
 
 // ---- Claim / report / release --------------------------------------------------
@@ -102,6 +107,7 @@ router.post('/sms/claim', validate(claimSchema), async (req, res) => {
      where m.id in (
        select m2.id from sms_messages m2 join sms_batches b on b.id = m2.batch_id
        where b.institute_id = $2
+         and ${visibleKinds(req.user)}
          and m2.status in ('pending', 'failed')
          and (m2.claimed_until is null or m2.claimed_until < now() or m2.claimed_by = $1)
          and b.created_at > now() - interval '${PENDING_DAYS} days'
@@ -120,29 +126,51 @@ router.post('/sms/claim', validate(claimSchema), async (req, res) => {
 
 const reportSchema = s.z.object({
   status: s.z.enum(['sent', 'failed']),
+  // For "sent": e.g. "unconfirmed" when the phone never confirmed it.
   reason: s.z.string().trim().max(300).optional(),
   channel: s.z.enum(['sms', 'whatsapp', 'sms_app']).default('sms'),
 });
 
-/** Result of one message: sent (by this user, now) or failed (back to the unsent list). */
+/**
+ * Result of one message claimed by this phone: sent (by this user, now) or
+ * failed (back to the unsent list). `stop: true` tells the phone to stop
+ * sending this list (it was stopped from Pending SMS).
+ */
 router.post('/sms/:id/report', validate(reportSchema), async (req, res) => {
   if (!isId(req.params.id)) throw notFound('Message');
   const { status, reason, channel } = req.body;
-  const row = await db.one(
-    `update sms_messages m set
-       status = $3,
-       reason = case when $3 = 'failed' then $4 else null end,
-       channel = $5,
-       sent_by = case when $3 = 'sent' then $2::uuid else m.sent_by end,
-       sent_at = case when $3 = 'sent' then now() else m.sent_at end,
-       claimed_by = null, claimed_until = null
-     from sms_batches b
-     where m.id = $1 and b.id = m.batch_id and b.institute_id = $6 and m.status <> 'sent'
-     returning m.*`,
-    [req.params.id, req.user.id, status, reason ?? null, channel, req.instituteId],
-  );
-  if (!row) throw notFound('Message');
-  res.json({ message: messageToPublic(row) });
+  const result = await db.tx(async (t) => {
+    const m = await t.one(
+      `select m.*, b.kind from sms_messages m join sms_batches b on b.id = m.batch_id
+       where m.id = $1 and b.institute_id = $2 for update of m`,
+      [req.params.id, req.instituteId],
+    );
+    if (!m || (FEE_KINDS.includes(m.kind) && !canAccessFees(req.user))) throw notFound('Message');
+    if (m.status === 'sent') return { row: m, alreadySent: true };
+    const claimedElsewhere =
+      m.claimed_by && m.claimed_by !== req.user.id && m.claimed_until && m.claimed_until > new Date();
+    if (claimedElsewhere) {
+      throw new ApiError(409, 'SENDING_ELSEWHERE', 'This message is being sent from another phone');
+    }
+    // A stopped (dismissed) message stays stopped unless this phone really sent it.
+    const stop = m.status === 'dismissed';
+    if (stop && status !== 'sent') return { row: m, stop };
+    const row = await t.one(
+      `update sms_messages set
+         status = $2, reason = $3, channel = $4,
+         sent_by = case when $2 = 'sent' then $5::uuid else sent_by end,
+         sent_at = case when $2 = 'sent' then now() else sent_at end,
+         claimed_by = null, claimed_until = null
+       where id = $1 returning *`,
+      [m.id, status, reason ?? null, channel, req.user.id],
+    );
+    return { row, stop };
+  });
+  res.json({
+    message: messageToPublic(result.row),
+    ...(result.alreadySent && { alreadySent: true }),
+    ...(result.stop && { stop: true }),
+  });
 });
 
 /** Gives back messages this phone claimed but did not send (e.g. its SMS limit was reached). */
@@ -175,6 +203,7 @@ router.get(
          left join users u on u.id = b.created_by
          left join classes c on c.id = b.class_id
          where b.institute_id = $1 and b.created_at > now() - make_interval(days => $2)
+           and ${visibleKinds(req.user)}
          group by b.id, u.name, c.name
          order by b.created_at desc`,
         [req.instituteId, req.validQuery.days],
@@ -218,19 +247,14 @@ router.get(
 
 /** Every message of a batch: who is still unsent, who sent what. */
 router.get('/sms/batches/:id', async (req, res) => {
-  const batch = await findOwned('sms_batches', req.params.id, req.instituteId, 'SMS list');
-  const rows = await db.query(
-    `select m.*, u.name as sent_by_name from sms_messages m
-     left join users u on u.id = m.sent_by
-     where m.batch_id = $1 order by m.position`,
-    [batch.id],
-  );
+  const batch = await findBatch(req, req.params.id);
+  const rows = await batchMessages(db, batch.id);
   res.json({ batch: { id: batch.id, title: batch.title, kind: batch.kind }, messages: rows.map(messageToPublic) });
 });
 
 /** Stops sending the rest of a batch (e.g. no longer needed). */
 router.post('/sms/batches/:id/dismiss', async (req, res) => {
-  const batch = await findOwned('sms_batches', req.params.id, req.instituteId, 'SMS list');
+  const batch = await findBatch(req, req.params.id);
   await db.query(
     `update sms_messages set status = 'dismissed', claimed_by = null, claimed_until = null
      where batch_id = $1 and status in ('pending', 'failed')`,

@@ -217,3 +217,35 @@ create table if not exists sms_messages (
   sent_at timestamptz
 );
 create index if not exists sms_messages_batch_idx on sms_messages (batch_id, status);
+
+-- ---- Attendance: versions and change history --------------------------------------
+-- version: bumped on every save; a save based on an older version is refused, so two
+-- teachers cannot silently overwrite each other.
+alter table attendance add column if not exists version integer not null default 1;
+
+-- One row per student whose saved status was changed later (who, when, from → to).
+create table if not exists attendance_changes (
+  id uuid primary key default gen_random_uuid(),
+  attendance_id uuid not null references attendance (id) on delete cascade,
+  student_id uuid not null references students (id) on delete cascade,
+  old_status text not null,
+  new_status text not null,
+  changed_by uuid references users (id) on delete set null,
+  changed_at timestamptz not null default now()
+);
+create index if not exists attendance_changes_attendance_idx on attendance_changes (attendance_id);
+
+-- ---- SMS: one list per purpose, one message per student ---------------------------
+-- dedupe_key, e.g. "absent:<class>:<date>", makes a second tap add only new students
+-- instead of messaging everyone again.
+alter table sms_batches add column if not exists dedupe_key text;
+create unique index if not exists sms_batches_dedupe_key on sms_batches (institute_id, dedupe_key)
+  where dedupe_key is not null;
+create unique index if not exists sms_messages_student_key on sms_messages (batch_id, student_id)
+  where student_id is not null;
+
+-- ---- Fee payments: retry-safe -------------------------------------------------------
+-- client_ref: id the app sends with a payment; a retry with the same id is not saved twice.
+alter table fee_payments add column if not exists client_ref text;
+create unique index if not exists fee_payments_client_ref on fee_payments (student_id, client_ref)
+  where client_ref is not null;

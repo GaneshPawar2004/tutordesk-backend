@@ -39,7 +39,7 @@ describe('parent SMS queue', () => {
     const created = await api()
       .post('/api/v1/sms/batches')
       .set(S)
-      .send({ kind: 'absent', title: 'Class 10 · Absent on 03-11-2026', classId, messages: list(120) })
+      .send({ kind: 'other', title: 'Class 10 · Absent on 03-11-2026', classId, messages: list(120) })
       .expect(201);
     batchId = created.body.batch;
     assert.equal(created.body.messages.length, 120);
@@ -102,8 +102,10 @@ describe('parent SMS queue', () => {
     assert.equal(batches.body.batches[0].remaining, 10);
     assert.equal(batches.body.batches[0].failed, 1);
 
-    // A sent message cannot be reported again.
-    await api().post(`/api/v1/sms/${a.body.messages[0].id}/report`).set(S).send({ status: 'failed' }).expect(404);
+    // A sent message stays sent when reported again.
+    const again2 = await api().post(`/api/v1/sms/${a.body.messages[0].id}/report`).set(S).send({ status: 'failed' }).expect(200);
+    assert.equal(again2.body.alreadySent, true);
+    assert.equal(again2.body.message.status, 'sent');
   });
 
   it('dismiss and expiry stop the rest', async () => {

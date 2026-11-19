@@ -18,8 +18,11 @@ function createApp() {
 
   // Keep-alive for uptime pingers: never touches the database, so Neon can still sleep.
   app.get(['/health', '/api/ping'], (_req, res) => res.json({ ok: true }));
-  // Render's health check: also confirms the database answers.
-  app.get('/api/health', async (_req, res) => {
+  // Render's health check runs every few seconds, so it must not touch the
+  // database: a query here keeps Neon awake 24/7 and burns the free compute.
+  app.get('/api/health', (_req, res) => res.json({ ok: true }));
+  // Manual database check (open in a browser); not used by Render.
+  app.get('/api/health/db', async (_req, res) => {
     await db.query('select 1');
     res.json({ ok: true, database: 'connected' });
   });

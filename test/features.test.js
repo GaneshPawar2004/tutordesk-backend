@@ -224,7 +224,8 @@ describe('classes, students, attendance, tests, fees, reports', () => {
 
   it('answers keep-alive and health checks', async () => {
     await api().get('/api/ping').expect(200, { ok: true });
-    const res = await api().get('/api/health').expect(200);
+    await api().get('/api/health').expect(200, { ok: true });
+    const res = await api().get('/api/health/db').expect(200);
     assert.equal(res.body.database, 'connected');
   });
 

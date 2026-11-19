@@ -97,7 +97,8 @@ Runs on Render via [render.yaml](render.yaml). Set `NODE_ENV=production`, a stro
 Amazon SES) so OTPs reach real inboxes.
 
 - `GET /api/ping`: keep-alive for uptime pingers; never touches the database.
-- `GET /api/health`: Render's health check; also runs `select 1`.
+- `GET /api/health`: Render's health check; never touches the database so Neon can sleep.
+- `GET /api/health/db`: manual check that runs `select 1`.
 
 ## Parent SMS queue
 

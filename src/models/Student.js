@@ -3,14 +3,21 @@ const { todayIST } = require('../utils/scope');
 const round2 = (n) => Math.round(n * 100) / 100;
 
 /**
- * Months billed so far for a monthly fee starting in [feeStart] ("YYYY-MM"):
- * the start month and every month up to the current one (India time).
+ * Months billed so far for a monthly fee starting on [feeStart] (India time).
+ * "YYYY-MM-DD" (fees start date, like the old Teachers App): one month is
+ * billed on the start date and again on the same day of every later month
+ * (the 31st counts as the month's last day in shorter months).
+ * Older "YYYY-MM" values: the start month and every month up to this one.
  */
 function monthsBilled(feeStart, today = todayIST()) {
-  const m = /^(\d{4})-(\d{2})/.exec(feeStart || '');
+  const m = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(feeStart || '');
   if (!m) return 0;
-  const [ty, tm] = today.split('-').map(Number);
-  return Math.max(0, (ty - Number(m[1])) * 12 + (tm - Number(m[2])) + 1);
+  const [ty, tm, td] = today.split('-').map(Number);
+  const months = (ty - Number(m[1])) * 12 + (tm - Number(m[2]));
+  if (!m[3]) return Math.max(0, months + 1);
+  const lastDay = new Date(Date.UTC(ty, tm, 0)).getUTCDate();
+  const reached = td >= Math.min(Number(m[3]), lastDay);
+  return Math.max(0, months + (reached ? 1 : 0));
 }
 
 /**

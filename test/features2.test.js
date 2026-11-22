@@ -32,6 +32,15 @@ describe('monthly fees, receipts, copy students, notes, institute details', () =
     assert.equal(monthsBilled(null, '2026-11-22'), 0);
   });
 
+  it('bills from a fees start date on the same day each month', () => {
+    assert.equal(monthsBilled('2026-09-15', '2026-09-15'), 1);
+    assert.equal(monthsBilled('2026-09-15', '2026-10-14'), 1);
+    assert.equal(monthsBilled('2026-09-15', '2026-10-15'), 2);
+    assert.equal(monthsBilled('2026-09-15', '2026-11-22'), 3);
+    assert.equal(monthsBilled('2026-01-31', '2026-02-28'), 2); // short month: last day
+    assert.equal(monthsBilled('2026-12-01', '2026-11-22'), 0);
+  });
+
   it('monthly fee accrues every month on top of one-time fees', async () => {
     await api().patch('/api/v1/account').set(H).send({ monthlyFees: true }).expect(200);
     const res = await api()
@@ -112,6 +121,24 @@ describe('monthly fees, receipts, copy students, notes, institute details', () =
     assert.ok(res.body.records.filter((r) => r.student !== asha.id).every((r) => r.note === ''));
     const hist = await api().get(`/api/v1/students/${asha.id}/attendance`).set(H).expect(200);
     assert.equal(hist.body.history[0].note, 'Sick');
+  });
+
+  it('exports the class history (attendance days and payments)', async () => {
+    const res = await api().get(`/api/v1/classes/${classId}/export`).set(H).expect(200);
+    assert.equal(res.body.attendance[today][asha.id], 'Sick');
+    assert.ok(res.body.payments[asha.id].length >= 1);
+    assert.equal(res.body.payments[asha.id][0].date, today);
+  });
+
+  it('accepts a full fees start date', async () => {
+    const res = await api()
+      .patch(`/api/v1/students/${asha.id}`)
+      .set(H)
+      .send({ feeStart: today })
+      .expect(200);
+    assert.equal(res.body.student.feeStart, today);
+    assert.equal(res.body.student.monthsBilled, 1);
+    await api().patch(`/api/v1/students/${asha.id}`).set(H).send({ feeStart: '2026-13-01' }).expect(400);
   });
 
   it('institute details and logo for receipts', async () => {

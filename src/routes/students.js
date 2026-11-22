@@ -19,9 +19,14 @@ const studentFields = {
   email: s.optionalEmail,
   dateOfBirth: s.nullableDate,
   totalFees: s.money,
-  // Monthly fees system: amount per month, billed from feeStart (YYYY-MM).
+  // Monthly fees system: amount per month, billed from the fees start date
+  // (YYYY-MM-DD; older apps send a month, YYYY-MM).
   monthlyFee: s.money,
-  feeStart: s.z.union([s.z.null(), s.z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use month format YYYY-MM')]),
+  feeStart: s.z.union([
+    s.z.null(),
+    s.z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use date format YYYY-MM-DD'),
+    s.z.iso.date('Use date format YYYY-MM-DD'),
+  ]),
   feesDueDate: s.nullableDate,
 };
 // Missing fields get their column defaults.
@@ -55,6 +60,36 @@ router.get('/classes/:classId/students', async (req, res) => {
   );
   const fees = canAccessFees(req.user);
   res.json({ students: students.map((st) => Student.toPublic(st, fees)) });
+});
+
+/**
+ * Whole-class history for the Excel/CSV export (Teachers App format):
+ * every attendance day per student and, with fee access, every payment.
+ */
+router.get('/classes/:classId/export', async (req, res) => {
+  const c = await findOwned('classes', req.params.classId, req.instituteId, 'Class');
+  const days = await db.query(
+    `select a.date, r.student_id, r.status, r.note
+     from attendance a join attendance_records r on r.attendance_id = a.id
+     where a.class_id = $1 order by a.date`,
+    [c.id],
+  );
+  const attendance = {};
+  for (const d of days) {
+    (attendance[d.date] ??= {})[d.student_id] = d.status === 'others' && d.note ? d.note : d.status;
+  }
+  const out = { attendance };
+  if (canAccessFees(req.user)) {
+    const pays = await db.query(
+      `select p.student_id, p.amount, to_char(p.paid_at at time zone 'Asia/Kolkata', 'YYYY-MM-DD') as date
+       from fee_payments p join students st on st.id = p.student_id
+       where st.class_id = $1 order by p.paid_at`,
+      [c.id],
+    );
+    out.payments = {};
+    for (const p of pays) (out.payments[p.student_id] ??= []).push({ date: p.date, amount: p.amount });
+  }
+  res.json(out);
 });
 
 router.post('/classes/:classId/students', validate(createSchema), async (req, res) => {

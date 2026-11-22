@@ -32,7 +32,7 @@ async function loadDay(c, date) {
       [c.id, date],
     ),
     db.query(
-      `select st.id, st.name, r.status from students st
+      `select st.id, st.name, r.status, r.note from students st
        left join attendance a on a.class_id = st.class_id and a.date = $2
        left join attendance_records r on r.attendance_id = a.id and r.student_id = st.id
        where st.class_id = $1 and not st.disabled
@@ -50,6 +50,8 @@ async function loadDay(c, date) {
   const records = students.map((st) => ({
     student: st.id,
     status: st.status || 'present',
+    // Reason for "others" (e.g. Sick); '' when none.
+    note: st.note || '',
     saved: Boolean(st.status),
     // sent | pending | failed | dismissed | null (no absence SMS for this day)
     sms: smsOf.get(st.id) ?? null,
@@ -91,7 +93,13 @@ router.get('/', validate(s.z.object({ date: s.isoDate.optional() }), 'query'), a
 const saveSchema = s.z.object({
   date: s.isoDate,
   records: s.z
-    .array(s.z.object({ student: s.objectId, status: s.z.enum(['present', 'absent', 'leave', 'others']) }))
+    .array(
+      s.z.object({
+        student: s.objectId,
+        status: s.z.enum(['present', 'absent', 'leave', 'others']),
+        note: s.z.string().trim().max(100).default(''),
+      }),
+    )
     .max(1000),
   // Version the screen was loaded with (null = not saved yet). Older apps omit it.
   version: s.z.number().int().nullable().optional(),
@@ -163,13 +171,15 @@ router.put('/', validate(saveSchema), async (req, res) => {
     if (records.length) {
       const params = [doc.id];
       const rows = records.map((r, i) => {
-        params.push(r.student, i, r.status);
+        // A reason is only kept for "others".
+        params.push(r.student, i, r.status, r.status === 'others' ? r.note : '');
         const p = params.length;
-        return `($1, $${p - 2}, $${p - 1}, $${p})`;
+        return `($1, $${p - 3}, $${p - 2}, $${p - 1}, $${p})`;
       });
       await t.query(
-        `insert into attendance_records (attendance_id, student_id, position, status) values ${rows.join(', ')}
-         on conflict (attendance_id, student_id) do update set status = excluded.status, position = excluded.position`,
+        `insert into attendance_records (attendance_id, student_id, position, status, note) values ${rows.join(', ')}
+         on conflict (attendance_id, student_id) do update
+           set status = excluded.status, position = excluded.position, note = excluded.note`,
         params,
       );
     }

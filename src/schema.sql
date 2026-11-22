@@ -249,3 +249,32 @@ create unique index if not exists sms_messages_student_key on sms_messages (batc
 alter table fee_payments add column if not exists client_ref text;
 create unique index if not exists fee_payments_client_ref on fee_payments (student_id, client_ref)
   where client_ref is not null;
+
+-- ---- Institute details (receipts) and settings ----------------------------------
+alter table institutes add column if not exists phone text not null default '';
+alter table institutes add column if not exists address text not null default '';
+-- Monthly fees system: students can have a monthly fee that accrues every month.
+alter table institutes add column if not exists monthly_fees boolean not null default false;
+-- Receipt numbers 1, 2, 3… per institute (taken when a payment is saved).
+alter table institutes add column if not exists next_receipt_no integer not null default 1;
+alter table institutes add column if not exists logo_updated_at timestamptz;
+
+create table if not exists institute_logos (
+  institute_id uuid primary key references institutes (id) on delete cascade,
+  mime text not null,
+  image bytea not null
+);
+
+-- ---- Monthly fees per student ----------------------------------------------------
+-- Due = total_fees (one-time, e.g. admission) + monthly_fee × months since fee_start.
+alter table students add column if not exists monthly_fee double precision not null default 0;
+alter table students add column if not exists fee_start text; -- YYYY-MM (first billed month)
+do $$ begin
+  alter table students add constraint students_monthly_fee_check check (monthly_fee >= 0);
+exception when duplicate_object then null;
+end $$;
+
+alter table fee_payments add column if not exists receipt_no integer;
+
+-- ---- "Others" attendance with a reason --------------------------------------------
+alter table attendance_records add column if not exists note text not null default '';

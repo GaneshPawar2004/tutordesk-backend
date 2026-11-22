@@ -38,6 +38,12 @@ async function instituteSummary(instituteId) {
     name: inst.name,
     trialEndsAt: inst.trial_ends_at,
     trialDaysRemaining: access.trialDaysRemaining,
+    // Shown on receipts.
+    phone: inst.phone ?? '',
+    address: inst.address ?? '',
+    logoUpdatedAt: inst.logo_updated_at ?? null,
+    // Settings
+    monthlyFees: inst.monthly_fees ?? false,
     access: {
       status: access.status,
       allowed: access.allowed,

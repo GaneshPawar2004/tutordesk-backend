@@ -19,13 +19,16 @@ const studentFields = {
   email: s.optionalEmail,
   dateOfBirth: s.nullableDate,
   totalFees: s.money,
+  // Monthly fees system: amount per month, billed from feeStart (YYYY-MM).
+  monthlyFee: s.money,
+  feeStart: s.z.union([s.z.null(), s.z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use month format YYYY-MM')]),
   feesDueDate: s.nullableDate,
 };
 // Missing fields get their column defaults.
 const createSchema = s.z.object(studentFields).partial().required({ name: true });
 const updateSchema = s.z.object({ ...studentFields, disabled: s.z.boolean() }).partial();
 
-const FEE_FIELDS = ['totalFees', 'feesDueDate'];
+const FEE_FIELDS = ['totalFees', 'monthlyFee', 'feeStart', 'feesDueDate'];
 
 function assertFeeEdit(user, body) {
   if (!canAccessFees(user) && FEE_FIELDS.some((f) => f in body)) {
@@ -57,14 +60,58 @@ router.get('/classes/:classId/students', async (req, res) => {
 router.post('/classes/:classId/students', validate(createSchema), async (req, res) => {
   const c = await findOwned('classes', req.params.classId, req.instituteId, 'Class');
   if (!canAccessFees(req.user)) {
-    delete req.body.totalFees;
-    delete req.body.feesDueDate;
+    for (const f of FEE_FIELDS) delete req.body[f];
   }
   await assertRollFree(c.id, req.body.rollNo);
   const data = { ...db.toColumns(req.body, Student.COLUMNS), institute_id: req.instituteId, class_id: c.id };
   const st = await db.one(...db.insertSql('students', data));
   res.status(201).json({ student: Student.toPublic(st, canAccessFees(req.user)) });
 });
+
+/**
+ * Copies students (details only — no fees, attendance or marks) into another
+ * class, e.g. for the next academic year. Students whose roll number is
+ * already used in the target class are skipped.
+ */
+router.post(
+  '/classes/:classId/students/copy',
+  validate(s.z.object({ to: s.objectId, students: s.z.array(s.objectId).min(1).max(2000) })),
+  async (req, res) => {
+    const from = await findOwned('classes', req.params.classId, req.instituteId, 'Class');
+    const to = await findOwned('classes', req.body.to, req.instituteId, 'Class');
+    if (from.id === to.id) throw badRequest('Choose a different class to copy to');
+    const result = await db.tx(async (t) => {
+      const picked = await t.query(
+        'select * from students where class_id = $1 and id = any($2::uuid[]) order by created_at',
+        [from.id, req.body.students],
+      );
+      const taken = new Set(
+        (await t.query("select roll_no from students where class_id = $1 and roll_no <> ''", [to.id])).map(
+          (r) => r.roll_no,
+        ),
+      );
+      let copied = 0;
+      const skipped = [];
+      for (const st of picked) {
+        if (st.roll_no && taken.has(st.roll_no)) {
+          skipped.push(st.name);
+          continue;
+        }
+        if (st.roll_no) taken.add(st.roll_no);
+        await t.query(
+          `insert into students (institute_id, class_id, name, father_name, contact, parent_mobile,
+             roll_no, email, date_of_birth)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [req.instituteId, to.id, st.name, st.father_name, st.contact, st.parent_mobile, st.roll_no, st.email,
+            st.date_of_birth],
+        );
+        copied += 1;
+      }
+      return { copied, skipped };
+    });
+    res.status(201).json(result);
+  },
+);
 
 // ---- Single student ----------------------------------------------------------
 router.get('/students/:id', async (req, res) => {
@@ -152,7 +199,7 @@ router.delete('/students/:id/photo', async (req, res) => {
 router.get('/students/:id/attendance', async (req, res) => {
   const st = await findOwned('students', req.params.id, req.instituteId, 'Student');
   const history = await db.query(
-    `select a.date, r.status from attendance_records r
+    `select a.date, r.status, r.note from attendance_records r
      join attendance a on a.id = r.attendance_id
      where r.student_id = $1 and a.class_id = $2
      order by a.date desc`,

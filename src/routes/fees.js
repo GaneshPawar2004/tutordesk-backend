@@ -12,10 +12,10 @@ const router = express.Router();
 // Only fee paths need fee access (this router is mounted at the API root).
 router.use(['/classes/:classId/fees', '/fees', '/students/:id/fees'], requireFeeAccess);
 
-const { round2, feesDue } = Student;
+const { round2, feesDue, totalDue } = Student;
 
 function summarize(students) {
-  const total = round2(students.reduce((a, st) => a + st.total_fees, 0));
+  const total = round2(students.reduce((a, st) => a + totalDue(st), 0));
   const collected = round2(students.reduce((a, st) => a + st.fees_paid, 0));
   return { total, collected, due: round2(Math.max(0, total - collected)) };
 }
@@ -62,6 +62,7 @@ const paymentToPublic = (p) => ({
   note: p.note,
   paidAt: p.paid_at,
   collectedBy: p.collected_by,
+  receiptNo: p.receipt_no ?? null,
   createdAt: p.created_at,
 });
 
@@ -81,19 +82,25 @@ router.post('/students/:id/fees/payments', validate(paymentSchema), async (req, 
       return res.status(200).json({ payment: paymentToPublic(earlier), student: Student.toPublic(st) });
     }
   }
-  if (st.total_fees <= 0) throw badRequest('Set total fees for this student first');
+  const owed = totalDue(st); // one-time + monthly fees billed so far
+  if (owed <= 0) throw badRequest('Set the fees for this student first');
 
   const { payment, updated } = await db.tx(async (t) => {
     // Atomic check-and-increment so two collectors can't overpay together.
     const row = await t.one(
       `update students set fees_paid = fees_paid + $2
-       where id = $1 and fees_paid + $2 <= total_fees + 0.001 returning *`,
-      [st.id, amount],
+       where id = $1 and fees_paid + $2 <= $3 + 0.001 returning *`,
+      [st.id, amount, owed],
     );
     if (!row) throw badRequest(`Amount exceeds due (₹${feesDue(st)})`);
+    // Next receipt number of the institute (the row lock keeps numbers unique).
+    const { no: receiptNo } = await t.one(
+      'update institutes set next_receipt_no = next_receipt_no + 1 where id = $1 returning next_receipt_no - 1 as no',
+      [req.instituteId],
+    );
     const p = await t.one(
-      `insert into fee_payments (institute_id, student_id, amount, note, paid_at, collected_by, client_ref)
-       values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+      `insert into fee_payments (institute_id, student_id, amount, note, paid_at, collected_by, client_ref, receipt_no)
+       values ($1, $2, $3, $4, $5, $6, $7, $8) returning *`,
       [
         req.instituteId,
         st.id,
@@ -102,6 +109,7 @@ router.post('/students/:id/fees/payments', validate(paymentSchema), async (req, 
         req.body.paidAt || new Date(),
         req.user.id,
         clientRef ?? null,
+        receiptNo,
       ],
     );
     return { payment: p, updated: row };
@@ -142,6 +150,7 @@ router.get('/students/:id/fees/payments', async (req, res) => {
       note: p.note,
       paidAt: p.paid_at,
       collectedBy: p.collector_name || '',
+      receiptNo: p.receipt_no ?? null,
     })),
   });
 });

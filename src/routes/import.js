@@ -39,8 +39,9 @@ const importSchema = s.z.object({
           .array(s.z.object({ amount: s.z.number().positive().max(1e9), paidAt: isoDate.nullable() }))
           .max(500)
           .default([]),
-        // date (YYYY-MM-DD) → status
-        attendance: s.z.record(isoDate, s.z.enum(['present', 'absent', 'leave', 'others'])).default({}),
+        // date (YYYY-MM-DD) → present | absent | leave | others, or any other
+        // text = "others" with that text as the reason (Teachers App writes notes so).
+        attendance: s.z.record(isoDate, s.z.string().trim().min(1).max(100)).default({}),
       }),
     )
     .min(1)
@@ -145,10 +146,12 @@ router.post('/', requireOwner, validate(importSchema), async (req, res) => {
     // Attendance history: one attendance row per date, records for imported students.
     const byDate = new Map();
     for (const i of newStudents) {
-      for (const [date, status] of Object.entries(students[i].attendance)) {
+      for (const [date, value] of Object.entries(students[i].attendance)) {
         if (date > today) continue;
+        const known = ['present', 'absent', 'leave', 'others'].includes(value.toLowerCase());
+        const status = known ? value.toLowerCase() : 'others';
         if (!byDate.has(date)) byDate.set(date, []);
-        byDate.get(date).push([ids[i], status]);
+        byDate.get(date).push([ids[i], status, known ? '' : value]);
       }
     }
     let attendanceDays = 0;
@@ -165,9 +168,9 @@ router.post('/', requireOwner, validate(importSchema), async (req, res) => {
       );
       await insertRows(
         t,
-        'insert into attendance_records (attendance_id, student_id, position, status)',
-        recs.map(([sid, status], k) => [day.id, sid, n + k, status]),
-        4,
+        'insert into attendance_records (attendance_id, student_id, position, status, note)',
+        recs.map(([sid, status, note], k) => [day.id, sid, n + k, status, note]),
+        5,
         'on conflict (attendance_id, student_id) do nothing',
       );
       attendanceDays += 1;

@@ -1,7 +1,7 @@
 const express = require('express');
 
 const db = require('../db');
-const { round2 } = require('../models/Student');
+const { round2, feesDue, totalDue } = require('../models/Student');
 const validate = require('../middleware/validate');
 const { canAccessFees } = require('../middleware/auth');
 const { todayIST } = require('../utils/scope');
@@ -17,16 +17,19 @@ router.get(
   async (req, res) => {
     const date = req.validQuery.date || todayIST();
     const inst = req.instituteId;
-    const [counts, institute] = await Promise.all([
+    const [counts, fees, institute] = await Promise.all([
       db.one(
         `select
            (select count(*)::int from classes where institute_id = $1) as classes,
            (select count(*)::int from students where institute_id = $1) as students,
-           (select coalesce(sum(greatest(0, total_fees - fees_paid)), 0)
-              from students where institute_id = $1) as fees_due,
            (select count(*)::int from attendance_records r join attendance a on a.id = r.attendance_id
               where a.institute_id = $1 and a.date = $2 and r.status = 'present') as present_today`,
         [inst, date],
+      ),
+      // Dues are worked out per student (monthly fees grow every month).
+      db.query(
+        'select total_fees, monthly_fee, fee_start, fees_paid from students where institute_id = $1',
+        [inst],
       ),
       instituteSummary(inst),
     ]);
@@ -35,22 +38,23 @@ router.get(
       classes: counts.classes,
       students: counts.students,
       presentToday: counts.present_today,
-      feesDue: canAccessFees(req.user) ? round2(counts.fees_due) : null,
+      feesDue: canAccessFees(req.user) ? round2(fees.reduce((a, st) => a + feesDue(st), 0)) : null,
     });
   },
 );
 
 router.get('/reports', async (req, res) => {
   const inst = req.instituteId;
-  const [classes, attendance] = await Promise.all([
+  const [classes, students, attendance] = await Promise.all([
     db.query(
-      `select c.id, c.name,
-         count(st.id)::int as student_count,
-         coalesce(sum(st.total_fees), 0) as total,
-         coalesce(sum(st.fees_paid), 0) as collected
+      `select c.id, c.name, count(st.id)::int as student_count
        from classes c left join students st on st.class_id = c.id
        where c.institute_id = $1
        group by c.id order by c.created_at`,
+      [inst],
+    ),
+    db.query(
+      'select class_id, total_fees, monthly_fee, fee_start, fees_paid from students where institute_id = $1',
       [inst],
     ),
     db.query(
@@ -60,6 +64,14 @@ router.get('/reports', async (req, res) => {
       [inst],
     ),
   ]);
+
+  const feeBy = new Map(classes.map((c) => [c.id, { total: 0, collected: 0 }]));
+  for (const st of students) {
+    const f = feeBy.get(st.class_id);
+    if (!f) continue;
+    f.total += totalDue(st);
+    f.collected += st.fees_paid;
+  }
 
   const att = new Map();
   for (const a of attendance) {
@@ -84,13 +96,16 @@ router.get('/reports', async (req, res) => {
       };
     }),
     fees: canAccessFees(req.user)
-      ? classes.map((c) => ({
-          class: c.id,
-          name: c.name,
-          total: round2(c.total),
-          collected: round2(c.collected),
-          due: round2(Math.max(0, c.total - c.collected)),
-        }))
+      ? classes.map((c) => {
+          const f = feeBy.get(c.id);
+          return {
+            class: c.id,
+            name: c.name,
+            total: round2(f.total),
+            collected: round2(f.collected),
+            due: round2(Math.max(0, f.total - f.collected)),
+          };
+        })
       : null,
   });
 });

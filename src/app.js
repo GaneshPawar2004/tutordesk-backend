@@ -13,6 +13,8 @@ function createApp() {
   app.set('trust proxy', 1);
   app.use(helmet());
   app.use(cors({ origin: config.corsOrigins.length ? config.corsOrigins : false }));
+  // Class imports carry a whole class's history (students × attendance days).
+  app.use('/api/v1/classes/:classId/import', express.json({ limit: '10mb' }));
   app.use(express.json({ limit: '1mb' }));
   if (!config.isTest) app.use(morgan(config.isProd ? 'combined' : 'dev'));
 
@@ -41,6 +43,7 @@ function createApp() {
   api.use('/', require('./routes/overview'));
   api.use('/classes', require('./routes/classes'));
   api.use('/classes/:classId/attendance', require('./routes/attendance'));
+  api.use('/classes/:classId/import', require('./routes/import'));
   api.use('/', require('./routes/students'));
   api.use('/', require('./routes/tests'));
   api.use('/', require('./routes/fees'));
